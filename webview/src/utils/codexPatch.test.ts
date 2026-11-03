@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { readPatchFiles } from './codexPatch';
+import { readEmbeddedPatches, readPatchFiles } from './codexPatch';
 
 describe('patch display', () => {
+  it('recovers apply_patch bodies wrapped in an exec script', () => {
+    expect(readEmbeddedPatches({ command: 'await tools.apply_patch("*** Begin Patch\\n*** Update File: a.ts\\n@@\\n-old\\n+new\\n*** End Patch");' }))
+      .toEqual(['*** Begin Patch\n*** Update File: a.ts\n@@\n-old\n+new\n*** End Patch']);
+    expect(readEmbeddedPatches({ code: 'const patch = `*** Begin Patch\n*** Add File: b.ts\n+created\n*** End Patch`;' }))
+      .toHaveLength(1);
+    expect(readEmbeddedPatches({ command: 'ls -la' })).toEqual([]);
+  });
   it('accepts the input argument used by function-call apply_patch', () => {
     const files = readPatchFiles({ input: '*** Begin Patch\n*** Add File: a.ts\n+const value = "literal";\n*** End Patch' });
     expect(files.map(file => file.path)).toEqual(['a.ts']);

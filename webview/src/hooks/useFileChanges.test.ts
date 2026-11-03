@@ -35,6 +35,17 @@ describe('file ledger work budget', () => {
     expect(result.current.find(file => file.filePath === '/moved.ts')?.operations[0]).toMatchObject({ moveFrom: '/old.ts', toolUseId: 'native' });
   });
 
+  it('adds edits Codex performs through an exec script', () => {
+    const patch = '*** Begin Patch\n*** Update File: /exec.ts\n@@\n-before\n+after\n*** End Patch';
+    const messages = [
+      assistantWithTools([{ id: 'exec-edit', name: 'functions.exec',
+        input: { code: `const result = await tools.apply_patch(${JSON.stringify(patch)}); text(result);` } }]),
+      userWithResults([{ toolUseId: 'exec-edit' }]),
+    ];
+    const { result } = renderHook(useFileChanges, { initialProps: snapshot(messages) });
+    expect(result.current).toMatchObject([{ filePath: '/exec.ts', additions: 1, deletions: 1 }]);
+  });
+
   it('keeps completed apply_patch edits across turns and ignores proposed or failed patches', () => {
     const patch = '*** Begin Patch\n*** Update File: /session.ts\n@@\n-before\n+after\n*** End Patch';
     const messages = [assistantWithTools([{ id: 'first', name: 'functions.apply_patch', input: { patch } }]),

@@ -20,6 +20,51 @@ export function readPatchOutcome(input?: ToolInput, result?: ToolResultBlock | n
   return { isUnknown, isError, isCompleted };
 }
 
+/** Decode one patch body; exec scripts carry it as a quoted JS string literal. */
+function decodePatchBody(body: string): string {
+  if (!body.includes('\n') && body.includes('\\n')) {
+    try {
+      return JSON.parse(`"${body}"`);
+    } catch {
+      return body
+        .replace(/\\r\\n/g, '\n')
+        .replace(/\\n/g, '\n')
+        .replace(/\\r/g, '\n')
+        .replace(/\\t/g, '\t')
+        .replace(/\\"/g, '"')
+        .replace(/\\'/g, "'")
+        .replace(/\\\\/g, '\\');
+    }
+  }
+  return body;
+}
+
+/**
+ * Recover apply_patch bodies embedded in a shell/exec tool input. Codex routes
+ * edits through `exec` scripts (`tools.apply_patch(...)`) by default, so the
+ * ledger cannot rely on a direct apply_patch tool call.
+ */
+export function readEmbeddedPatches(input?: ToolInput): string[] {
+  if (!input) return [];
+  for (const field of ['patch', 'input', 'code', 'command', 'cmd']) {
+    const candidate = input[field];
+    if (typeof candidate !== 'string') continue;
+    const patches: string[] = [];
+    let from = 0;
+    while (true) {
+      const begin = candidate.indexOf('*** Begin Patch', from);
+      if (begin < 0) break;
+      const end = candidate.indexOf('*** End Patch', begin);
+      if (end < 0) break;
+      const next = end + '*** End Patch'.length;
+      patches.push(decodePatchBody(candidate.slice(begin, next)));
+      from = next;
+    }
+    if (patches.length > 0) return patches;
+  }
+  return [];
+}
+
 function readDiff(lines: string[], unified: boolean): DiffResult {
   const diff: DiffResult = { lines: [], additions: 0, deletions: 0 };
   const hasHeaders = lines.some((line, index) => line.startsWith('diff --git ')

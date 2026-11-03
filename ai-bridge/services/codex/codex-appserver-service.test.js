@@ -567,6 +567,31 @@ test('started-only native reasoning settles on cancellation, failure and success
   }
 });
 
+test('started-only native file changes settle as completed on a successful turn', async () => {
+  const markers = [];
+  const { service, getClient, getPeer } = makeService({ scenario: 'never-respond',
+    serviceOpts: { emitMarker: (_operation, marker) => markers.push(marker) } });
+  try {
+    const send = service.send({ input: [{ type: 'text', text: 'edit a file' }] });
+    await waitFor(() => [...service.operations.values()][0]?.nativeTurnId);
+    const operation = [...service.operations.values()][0];
+    for (const id of getPeer().pendingAcks.keys()) getPeer().ackPending(id, { turn: { id: operation.nativeTurnId } });
+    getClient().emit('notification', { method: 'item/started', params: {
+      threadId: operation.threadId, turnId: operation.nativeTurnId,
+      item: { id: 'edit-file', type: 'fileChange', status: 'in_progress',
+        changes: [{ path: '/tmp/a.ts', kind: 'update', diff: '@@ -1 +1 @@\n-old\n+new\n' }] } } });
+    getClient().emit('notification', { method: 'turn/completed', params: {
+      threadId: operation.threadId, turn: { id: operation.nativeTurnId, status: 'completed' } } });
+    assert.equal((await send).outcome, 'completed');
+    const edits = markers.filter(marker => String(marker).startsWith('[MESSAGE] '))
+      .map(marker => JSON.parse(marker.slice('[MESSAGE] '.length)))
+      .filter(message => message.message?.content?.some(block => block.name === 'file_change'));
+    assert.equal(edits.length, 2, 'the settled edit reuses the started card identity');
+    assert.equal(edits[1].uuid, edits[0].uuid);
+    assert.equal(edits[1].message.content[0].input.status, 'completed');
+  } finally { await service.resetRuntime(); }
+});
+
 test('image generation starts visibly and keeps its native PNG result under the same card identity', async () => {
   const markers = [];
   const { service, getPeer } = makeService({ scenario: 'never-respond',

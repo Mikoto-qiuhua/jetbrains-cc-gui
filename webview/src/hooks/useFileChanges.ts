@@ -4,12 +4,13 @@ import type { FileChangeSummary } from '../types/fileChanges';
 import type { SubagentHistoryResponse } from '../types/subagent';
 import {
   FILE_MODIFY_TOOL_NAMES,
+  BASH_TOOL_NAMES,
   AGENT_TOOL_NAMES,
   isToolName,
   normalizeToolName,
 } from '../utils/toolConstants';
 import { normalizeToolInput } from '../utils/toolInputNormalization';
-import { readPatchFiles, readPatchOutcome } from '../utils/codexPatch';
+import { readEmbeddedPatches, readPatchFiles, readPatchOutcome } from '../utils/codexPatch';
 import { collectPatchLedger } from '../utils/patchLedger';
 import { PATCH_TOOL_NAMES } from '../utils/toolConstants';
 import { getToolLineInfo } from '../utils/toolPresentation';
@@ -201,6 +202,9 @@ function sameFileChangeSummaries(a: FileChangeSummary[], b: FileChangeSummary[])
   return true;
 }
 
+/** Shell/script tools that may carry an apply_patch body in their command. */
+const SHELL_PATCH_TOOL_NAMES = new Set([...BASH_TOOL_NAMES, 'exec']);
+
 interface FileToolInput {
   sourceId: string;
   toolUseId?: string;
@@ -213,7 +217,17 @@ interface FileToolInput {
 
 function collectLedgerOpsFromToolUse(params: FileToolInput, out: LedgerOp[]): void {
   const { sourceId, toolUseId, toolName, rawName, input, result, agentId } = params;
-  if (!isToolName(toolName, FILE_MODIFY_TOOL_NAMES)) return;
+  if (!isToolName(toolName, FILE_MODIFY_TOOL_NAMES)) {
+    // Codex edits through exec scripts by default; the wrapped apply_patch is
+    // only visible in the command, so read it instead of a dedicated tool call.
+    if (!isToolName(toolName, SHELL_PATCH_TOOL_NAMES) || !isSuccessfulResult(result)) return;
+    for (const patch of readEmbeddedPatches(input)) {
+      for (const file of readPatchFiles({ patch })) {
+        out.push(...collectPatchLedger(file, { sourceId, toolUseId, agentId }));
+      }
+    }
+    return;
+  }
   if (isToolName(toolName, PATCH_TOOL_NAMES)) {
     const outcome = readPatchOutcome(input, result);
     if (!outcome.isCompleted || outcome.isError || outcome.isUnknown) return;
@@ -431,7 +445,9 @@ export function useFileChanges({
           agentKeysAfterBase.add(block.id);
         }
 
-        if (!isToolName(toolName, FILE_MODIFY_TOOL_NAMES)) return;
+        // Shell/exec blocks are collected too: Codex wraps apply_patch in them.
+        if (!isToolName(toolName, FILE_MODIFY_TOOL_NAMES)
+          && !isToolName(toolName, SHELL_PATCH_TOOL_NAMES)) return;
 
         const rawInput = block.input as Record<string, unknown> | undefined;
         if (!rawInput) return;
