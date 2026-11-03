@@ -50,6 +50,17 @@ describe('file ledger work budget', () => {
     expect(result.current[0].operations[0]).toMatchObject({ toolName: 'edit', oldString: 'before', newString: 'after' });
   });
 
+  it('adds edits from a functions.exec_command apply_patch heredoc', () => {
+    const patch = '*** Begin Patch\n*** Update File: /cmd.ts\n@@\n-before\n+after\n*** End Patch';
+    const messages = [
+      assistantWithTools([{ id: 'cmd-edit', name: 'functions.exec_command',
+        input: { cmd: `apply_patch <<'EOF'\n${patch}\nEOF` } }]),
+      userWithResults([{ toolUseId: 'cmd-edit' }]),
+    ];
+    const { result } = renderHook(useFileChanges, { initialProps: snapshot(messages) });
+    expect(result.current).toMatchObject([{ filePath: '/cmd.ts', additions: 1, deletions: 1 }]);
+  });
+
   it('keeps completed apply_patch edits across turns and ignores proposed or failed patches', () => {
     const patch = '*** Begin Patch\n*** Update File: /session.ts\n@@\n-before\n+after\n*** End Patch';
     const messages = [assistantWithTools([{ id: 'first', name: 'functions.apply_patch', input: { patch } }]),
