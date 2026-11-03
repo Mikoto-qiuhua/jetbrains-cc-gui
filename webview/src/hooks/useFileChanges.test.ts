@@ -38,12 +38,16 @@ describe('file ledger work budget', () => {
   it('adds edits Codex performs through an exec script', () => {
     const patch = '*** Begin Patch\n*** Update File: /exec.ts\n@@\n-before\n+after\n*** End Patch';
     const messages = [
+      // Matches the app-server projection: exec's script is carried as input.patch
+      // and the patch itself is an escaped JS string literal inside that script.
       assistantWithTools([{ id: 'exec-edit', name: 'functions.exec',
-        input: { code: `const result = await tools.apply_patch(${JSON.stringify(patch)}); text(result);` } }]),
+        input: { patch: `const patch = ${JSON.stringify(patch)}; const result = await tools.apply_patch(patch); text(result);` } }]),
       userWithResults([{ toolUseId: 'exec-edit' }]),
     ];
     const { result } = renderHook(useFileChanges, { initialProps: snapshot(messages) });
     expect(result.current).toMatchObject([{ filePath: '/exec.ts', additions: 1, deletions: 1 }]);
+    // The recovered hunks must stay reversible in the edits panel.
+    expect(result.current[0].operations[0]).toMatchObject({ toolName: 'edit', oldString: 'before', newString: 'after' });
   });
 
   it('keeps completed apply_patch edits across turns and ignores proposed or failed patches', () => {
