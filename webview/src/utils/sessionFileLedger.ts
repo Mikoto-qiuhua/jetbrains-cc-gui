@@ -275,13 +275,37 @@ function determineStatus(ops: LedgerOp[], baseline: string): FileChangeStatus {
   return 'M';
 }
 
+function isAbsoluteFilePath(path: string): boolean {
+  return path.startsWith('/') || path.startsWith('\\\\') || /^[A-Za-z]:[\\/]/.test(path);
+}
+
+/**
+ * Shell deletes often use a project-relative path while the file was created
+ * through an MCP tool that returned an absolute path. Reconcile by the trailing
+ * project-relative suffix so the created entry is not left behind.
+ */
+function matchExistingPath(byPath: Map<string, LedgerOp[]>, path: string): string | null {
+  if (byPath.has(path)) return path;
+  if (isAbsoluteFilePath(path)) return null;
+  const relative = path.replace(/\\/g, '/').replace(/^\.\//, '');
+  for (const key of byPath.keys()) {
+    if (key.replace(/\\/g, '/').endsWith(`/${relative}`)) return key;
+  }
+  return null;
+}
+
 /**
  * Build per-file ledger entries from ordered successful ops (all agents mixed by time).
  */
 export function buildSessionFileLedger(ops: LedgerOp[]): SessionFileLedgerEntry[] {
   const byPath = new Map<string, LedgerOp[]>();
 
-  for (const op of ops) {
+  for (const rawOp of ops) {
+    let op = rawOp;
+    if (op.fileChangeKind === 'delete') {
+      const matched = matchExistingPath(byPath, op.filePath);
+      if (matched && matched !== op.filePath) op = { ...op, filePath: matched };
+    }
     if (!op.filePath) continue;
     if (op.oldString === '' && op.newString === '' && !op.fileChangeKind) continue;
     if (op.moveFrom && op.moveFrom !== op.filePath) {

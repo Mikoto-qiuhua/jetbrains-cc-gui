@@ -2,7 +2,7 @@
 
 ## 1. 概述
 
-本次修改解决了四类问题：Codex 通过 `exec` 脚本修改文件时编辑记录栏不显示、Codex 未发送终态 `fileChange` 时文件一直停留在 `inProgress`、JetBrains IDEA MCP 提供的文件操作完全不被统计，以及撤销修改时 IDEA 抛出的 read-action 线程断言异常。修改覆盖前端编辑账本（Webview）、Codex app-server 服务层和 Java 插件撤销处理器，并补充了对应单元测试、重新构建了可安装插件包。
+本次修改解决了五类问题：Codex 通过 `exec` 脚本修改文件时编辑记录栏不显示、Codex 未发送终态 `fileChange` 时文件一直停留在 `inProgress`、JetBrains IDEA MCP 提供的文件操作完全不被统计、会话内创建的文件被删除后仍残留在编辑栏，以及撤销修改时 IDEA 抛出的 read-action 线程断言异常。修改覆盖前端编辑账本（Webview）、Codex app-server 服务层和 Java 插件撤销处理器，并补充了对应单元测试、重新构建了可安装插件包。
 
 ## 2. 问题背景
 
@@ -57,17 +57,31 @@ Read access is allowed from inside read-action only
 
 异常发生在 native 编辑校验分支，普通编辑分支已经完成回滚，所以表现为“日志报错但内容其实撤回成功”。
 
+### 2.5 会话内创建的文件被删除后仍残留
+
+账本只按“成功工具调用”追加记录，不会回头核对文件的最终状态。Codex 删除文件有两条路径：
+
+- `apply_patch` 的 `*** Delete File:`：旧逻辑已能处理；
+- shell 命令 `rm` / `git rm` / `del` / `Remove-Item`：旧逻辑完全不识别。
+
+因此通过 shell 删除的文件不会产生删除记录，先前创建该文件的记录也不会被移除，编辑栏里一直保留一个磁盘上已不存在的文件。同理，如果创建时 MCP 返回绝对路径、删除时 shell 使用相对路径，两条记录路径不一致，也无法合并。
+
+部分行删除（例如先加 10 行、后续补丁再删 5 行）在 patch 可解析且能按顺序重建时已经按净变化统计；只有删除动作来自无法静态解析的 shell 脚本时才会失真。
+
 ## 3. 修改总览
 
 | 文件 | 修改内容 |
 |---|---|
 | `webview/src/utils/codexPatch.ts` | 新增 `readEmbeddedPatches` 与 `decodePatchBody`，从 shell/exec 输入中提取 apply_patch 文本 |
 | `webview/src/utils/toolConstants.ts` | 新增 `MCP_FILE_MODIFY_TOOL_NAMES` 并合并进 `FILE_MODIFY_TOOL_NAMES` |
-| `webview/src/hooks/useFileChanges.ts` | 采集 shell/exec 调用；解包 MCP `arguments`；解析 `pathInProject`；支持 `text` 与空文件创建 |
+| `webview/src/hooks/useFileChanges.ts` | 采集 shell/exec 调用；解包 MCP `arguments`；解析 `pathInProject`；支持 `text` 与空文件创建；采集 shell 删除与重命名 |
+| `webview/src/utils/shellFileOps.ts` | 新增 shell 文件操作解析：`rm` / `git rm` / `del` / `Remove-Item` / `mv` 等 |
+| `webview/src/utils/sessionFileLedger.ts` | 删除记录按项目相对路径后缀合并，解决绝对路径与相对路径对不上导致创建记录残留 |
 | `ai-bridge/services/codex/codex-appserver-service.js` | 成功 turn 结算时把未终态的 `fileChange` 提升为 `completed` |
 | `src/main/java/com/github/claudecodegui/handler/file/UndoFileHandler.java` | 文档读取全部包进 `runReadAction` |
 | `webview/src/hooks/useFileChanges.test.ts` | 新增 exec 内嵌 patch 与 JetBrains MCP 用例 |
 | `webview/src/utils/codexPatch.test.ts` | 新增内嵌 patch 提取用例 |
+| `webview/src/utils/shellFileOps.test.ts` | 新增 shell 删除、重命名、heredoc、通配符等解析用例 |
 | `webview/src/utils/toolConstants.test.ts` | 新增 MCP 工具名归一化用例 |
 | `ai-bridge/services/codex/codex-appserver-service.test.js` | 新增 fileChange 终态提升用例 |
 | `idea-claude-code-gui-0.6.3.zip` | 重新构建的可安装插件包 |
@@ -258,6 +272,59 @@ Document document = ApplicationManager.getApplication().runReadAction(
 - 文档模型读取加 read action；
 - `document.setText` 等写操作仍在 EDT 的 write action 中执行。
 
+### 4.6 删除与重命名的账本对账
+
+文件：`webview/src/utils/shellFileOps.ts`、`webview/src/hooks/useFileChanges.ts`、`webview/src/utils/sessionFileLedger.ts`
+
+新增 `readShellFileOps`，从 shell 工具的 `command` / `cmd` / `shell_command` 字段中识别：
+
+| 操作 | 支持的写法 |
+|---|---|
+| 删除 | `rm`、`unlink`、`git rm`、`del`、`erase`、`Remove-Item` / `ri` |
+| 重命名/移动 | `mv`、`git mv`、`move`、`Move-Item`、`Rename-Item` |
+
+解析特点：
+
+- 支持多路径、`-rf` 等短参数、`--` 之后的字面路径、引号包裹的路径；
+- 支持 `&&`、`;`、`||` 链式命令；
+- 忽略 heredoc 正文，避免把文件内容里以 `rm` 开头的行误判为命令；
+- 跳过含 `*`、`$`、反引号等需要 shell 求值的路径，宁可漏记也不误删账本；
+- `git rm --cached` 不改变工作区文件，主动忽略。
+
+删除与移动会生成对应的账本操作：
+
+```ts
+// 删除
+{ filePath, toolName: 'rm', oldString: '', newString: '',
+  fileChangeKind: 'delete', oldStringKnown: false }
+
+// 重命名
+{ filePath: destination, moveFrom: source, toolName: 'mv',
+  oldString: '', newString: '', fileChangeKind: 'update' }
+```
+
+`buildSessionFileLedger` 的既有规则会把“首个操作是新增、最后一个操作是删除”的文件整体移除，因此：
+
+- 会话内创建后又被 `apply_patch` 或 `rm` 删除的文件不再显示；
+- 会话前已存在、会话内被删除的文件仍显示为 `D`；
+- 创建后用 `mv` 移动的文件，记录会迁移到新路径并保留 `moveFrom`。
+
+为处理创建路径与删除路径形式不一致的情况，新增后缀对账：
+
+```ts
+function matchExistingPath(byPath, path) {
+  if (byPath.has(path)) return path;
+  if (isAbsoluteFilePath(path)) return null;
+  const relative = path.replace(/\\/g, '/').replace(/^\.\//, '');
+  for (const key of byPath.keys()) {
+    if (key.replace(/\\/g, '/').endsWith(`/${relative}`)) return key;
+  }
+  return null;
+}
+```
+
+例如 MCP `create_new_file` 记录 `/proj/src/created.ts`，后续 `rm -f src/created.ts` 会按 `src/created.ts` 后缀匹配到同一条目，创建记录被正确移除。
+
 ## 5. 测试
 
 ### 5.1 前端单测
@@ -285,6 +352,24 @@ Document document = ApplicationManager.getApplication().runReadAction(
 - 通用 MCP `write_file`：验证 `arguments` 解包不只对 JetBrains 生效；
 - 失败调用：`isError: true` 时不产生账本记录。
 
+**`webview/src/utils/shellFileOps.test.ts`**
+
+- `rm` 多目标、`git rm`、`unlink` 三种删除写法；
+- cmd 与 PowerShell 的 `del` / `Remove-Item`；
+- `mv`、`git mv` 重命名，普通命令不误判；
+- heredoc 正文、通配符、变量路径全部忽略；
+- `git rm --cached` 忽略；
+- `&&` / `;` 链式命令。
+
+**`webview/src/hooks/useFileChanges.test.ts` 中的对账用例**
+
+- 创建后 `rm`：文件从编辑栏消失；
+- 创建后 `apply_patch *** Delete File`：文件从编辑栏消失；
+- 先加 10 行、后续补丁删除 5 行：统计为净 `+5 / -0`；
+- 会话前已存在的文件被删除：保留 `D` 状态；
+- 创建后 `mv`：记录迁移到新路径并保留 `moveFrom`；
+- MCP 绝对路径创建 + 相对路径 `rm`：后缀匹配后正确移除。
+
 **`webview/src/utils/toolConstants.test.ts`**
 
 - `create_new_file` / `replace_text_in_file` 命中 `FILE_MODIFY_TOOL_NAMES`；
@@ -304,7 +389,7 @@ npm test
 结果：
 
 - `scripts/copy-dist.test.mjs` 通过；
-- Vitest 全量：**243 个测试文件、2534 个用例全部通过**；
+- Vitest 全量：**244 个测试文件、2549 个用例全部通过**；
 - `tsc -p tsconfig.test.json --noEmit` 类型检查通过。
 
 ### 5.3 Java 测试
@@ -340,6 +425,9 @@ gradle buildPlugin
 |---|---|
 | `reformat_file` 不统计 | 该工具只提供路径，没有修改前后文本；强行记录会生成错误的撤销内容（撤销会把文件清空），因此主动跳过 |
 | 未处理 `multi_tool_use.parallel` 内层参数 | 当前只扫描 shell/exec 输入的直接字段；若 patch 被包在并行调用的嵌套 JSON 中，需要额外解析 |
+| shell 内联编辑不统计 | `sed -i`、`awk`、Python 脚本等对文件内容的原地修改无法静态还原成可撤销操作，因此不进入账本 |
+| `functions.exec` 内层命令不解析 | 只解析 `exec_command` / `bash` 的直接 `cmd` / `command`；若在 `exec` 的 JS 脚本里调用 `tools.exec_command({ cmd: 'rm ...' })`，当前不会识别 |
+| 含通配符或变量的删除路径 | `rm -rf src/*.ts`、`rm "$DIR/file"` 主动跳过，避免误删账本条目 |
 | `create_new_file` 覆盖已有文件 | 若设置 `overwrite: true` 覆盖旧文件，入参没有旧内容，撤销只能清空文件，无法恢复覆盖前内容 |
 | 新建文件撤销语义 | 撤销后文件内容为空，不会删除文件本身 |
 | 缺少 `projectPath` | 只保留 `pathInProject` 相对路径，可能导致撤销时无法解析到项目内文件 |
@@ -362,7 +450,20 @@ gradle buildPlugin
 - 增删行数正确；
 - 撤销可恢复内容。
 
-### 7.3 验证 JetBrains MCP
+### 7.3 验证删除与净变化
+
+1. 让 Codex 创建一个文件（`apply_patch` 或 `create_new_file`），确认编辑栏出现 `A`；
+2. 让 Codex 用 shell 删除它：
+
+   ```text
+   请使用 exec_command 执行 rm -f src/ledger-delete.ts，不要用 apply_patch。
+   ```
+
+3. 预期：该文件从编辑栏消失，而不是继续显示 `A`；
+4. 再创建一个 10 行文件，让 Codex 用补丁删除其中 5 行，预期统计为 `+5 / -0`；
+5. 删除一个会话前已存在的文件，预期显示 `D`（不是消失）。
+
+### 7.4 验证 JetBrains MCP
 
 先确认 MCP 可用（只读工具）：
 
@@ -396,7 +497,7 @@ hello
 
 预期状态 `A`、`+2 / -0`。
 
-### 7.4 验证撤销不再报错
+### 7.5 验证撤销不再报错
 
 撤销后打开 `Help → Show Log in Explorer` 的 `idea.log`，确认不再出现：
 
@@ -419,6 +520,7 @@ Read access is allowed from inside read-action only
 | 完全没有文件 | 工具名未命中、调用失败、或不是 MCP 文件工具 |
 | 路径是相对路径 | `arguments` 中缺少 `projectPath` |
 | 行数不对 | 工具入参字段与 `oldText` / `newText` 不匹配 |
+| 文件已删除但编辑栏仍显示 | 删除命令未被识别（`sed -i`、JS 脚本内层命令、通配符路径），或创建 / 删除路径形式不一致 |
 | 撤销无效 | 路径无法解析到项目内文件，或为新建文件撤销 |
 | 仍有 read-action 报错 | 其他 `Document` / `VirtualFile` 访问点未包 read action，需要新的堆栈 |
 
@@ -432,6 +534,9 @@ webview/src/hooks/useFileChanges.ts
 webview/src/hooks/useFileChanges.test.ts
 webview/src/utils/codexPatch.ts
 webview/src/utils/codexPatch.test.ts
+webview/src/utils/sessionFileLedger.ts
+webview/src/utils/shellFileOps.ts
+webview/src/utils/shellFileOps.test.ts
 webview/src/utils/toolConstants.ts
 webview/src/utils/toolConstants.test.ts
 idea-claude-code-gui-0.6.3.zip

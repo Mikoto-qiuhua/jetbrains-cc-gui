@@ -1123,3 +1123,123 @@ describe('JetBrains MCP file tools', () => {
     expect(result.current).toEqual([]);
   });
 });
+
+describe('ledger reconciliation after later file operations', () => {
+  beforeEach(() => {
+    clearDiffCache();
+    clearFileTouchRegistry();
+    localStorage.clear();
+  });
+
+  const execPatch = (id: string, patch: string): ClaudeMessage => assistantWithTools([{
+    id,
+    name: 'functions.exec',
+    input: { patch: `const patch = ${JSON.stringify(patch)}; await tools.apply_patch(patch);` },
+  }]);
+
+  const shell = (id: string, cmd: string): ClaudeMessage => assistantWithTools([{
+    id,
+    name: 'functions.exec_command',
+    input: { cmd },
+  }]);
+
+  const run = (messages: ClaudeMessage[]) => renderHook(() =>
+    useFileChanges({ messages, getContentBlocks, findToolResult: makeFindToolResult(messages) }));
+
+  it('drops a file created earlier and then deleted by rm', () => {
+    const add = '*** Begin Patch\n*** Add File: /tmp/created.ts\n+hello\n*** End Patch';
+    const messages = [
+      execPatch('create', add),
+      userWithResults([{ toolUseId: 'create' }]),
+      shell('remove', 'rm -f /tmp/created.ts'),
+      userWithResults([{ toolUseId: 'remove' }]),
+    ];
+
+    const { result } = run(messages);
+
+    expect(result.current).toEqual([]);
+  });
+
+  it('drops an absolute MCP creation when a relative rm removes the same file', () => {
+    const create: ClaudeMessage = assistantWithTools([{
+      id: 'mcp-create',
+      name: 'create_new_file',
+      input: { server: 'jetbrains', arguments: { pathInProject: 'src/created.ts', text: 'hello', projectPath: '/proj' } },
+    }]);
+    const messages = [
+      create,
+      userWithResults([{ toolUseId: 'mcp-create' }]),
+      shell('remove', 'rm -f src/created.ts'),
+      userWithResults([{ toolUseId: 'remove' }]),
+    ];
+
+    const { result } = run(messages);
+
+    expect(result.current).toEqual([]);
+  });
+
+  it('drops a file created earlier and then deleted by apply_patch', () => {
+    const add = '*** Begin Patch\n*** Add File: /tmp/created.ts\n+hello\n*** End Patch';
+    const remove = '*** Begin Patch\n*** Delete File: /tmp/created.ts\n*** End Patch';
+    const messages = [
+      execPatch('create', add),
+      userWithResults([{ toolUseId: 'create' }]),
+      execPatch('remove', remove),
+      userWithResults([{ toolUseId: 'remove' }]),
+    ];
+
+    const { result } = run(messages);
+
+    expect(result.current).toEqual([]);
+  });
+
+  it('reports the net line change when later edits remove added lines', () => {
+    const lines = Array.from({ length: 10 }, (_, index) => `line${index + 1}`);
+    const add = `*** Begin Patch\n*** Add File: /tmp/grow.ts\n${lines.map(line => `+${line}`).join('\n')}\n*** End Patch`;
+    const remove = `*** Begin Patch\n*** Update File: /tmp/grow.ts\n@@\n line5\n${lines.slice(5).map(line => `-${line}`).join('\n')}\n*** End Patch`;
+    const messages = [
+      execPatch('create', add),
+      userWithResults([{ toolUseId: 'create' }]),
+      execPatch('trim', remove),
+      userWithResults([{ toolUseId: 'trim' }]),
+    ];
+
+    const { result } = run(messages);
+
+    expect(result.current).toHaveLength(1);
+    expect(result.current[0]).toMatchObject({
+      filePath: '/tmp/grow.ts',
+      status: 'A',
+      additions: 5,
+      deletions: 0,
+    });
+  });
+
+  it('keeps a deletion of a file that existed before the session', () => {
+    const messages = [
+      shell('remove', 'rm -f /tmp/legacy.ts'),
+      userWithResults([{ toolUseId: 'remove' }]),
+    ];
+
+    const { result } = run(messages);
+
+    expect(result.current).toHaveLength(1);
+    expect(result.current[0]).toMatchObject({ filePath: '/tmp/legacy.ts', status: 'D' });
+  });
+
+  it('moves ledger entries when a shell rename follows a creation', () => {
+    const add = '*** Begin Patch\n*** Add File: /tmp/old-name.ts\n+content\n*** End Patch';
+    const messages = [
+      execPatch('create', add),
+      userWithResults([{ toolUseId: 'create' }]),
+      shell('rename', 'mv /tmp/old-name.ts /tmp/new-name.ts'),
+      userWithResults([{ toolUseId: 'rename' }]),
+    ];
+
+    const { result } = run(messages);
+
+    expect(result.current).toHaveLength(1);
+    expect(result.current[0]).toMatchObject({ filePath: '/tmp/new-name.ts', status: 'A', additions: 1 });
+    expect(result.current[0].operations[1]).toMatchObject({ moveFrom: '/tmp/old-name.ts' });
+  });
+});

@@ -11,6 +11,7 @@ import {
 } from '../utils/toolConstants';
 import { normalizeToolInput } from '../utils/toolInputNormalization';
 import { readEmbeddedPatches, readPatchFiles, readPatchOutcome } from '../utils/codexPatch';
+import { readShellFileOps } from '../utils/shellFileOps';
 import { collectPatchLedger } from '../utils/patchLedger';
 import { PATCH_TOOL_NAMES } from '../utils/toolConstants';
 import { getToolLineInfo } from '../utils/toolPresentation';
@@ -243,9 +244,25 @@ function collectLedgerOpsFromToolUse(params: FileToolInput, out: LedgerOp[]): vo
     // Codex edits through exec scripts by default; the wrapped apply_patch is
     // only visible in the command, so read it instead of a dedicated tool call.
     if (!isToolName(toolName, SHELL_PATCH_TOOL_NAMES) || !isSuccessfulResult(result)) return;
+    const owner = { sourceId, toolUseId, agentId };
+    const deletedByPatch = new Set<string>();
     for (const patch of readEmbeddedPatches(toolInput)) {
       for (const file of readPatchFiles({ patch })) {
-        out.push(...collectPatchLedger(file, { sourceId, toolUseId, agentId }));
+        if (file.kind === 'delete') deletedByPatch.add(file.path);
+        out.push(...collectPatchLedger(file, owner));
+      }
+    }
+    // Codex also removes files with plain shell commands (rm / del / Remove-Item).
+    // Without this, a file created earlier in the session keeps showing up after
+    // it has already been deleted from disk.
+    for (const op of readShellFileOps(toolInput)) {
+      if (op.kind === 'delete') {
+        if (deletedByPatch.has(op.path)) continue;
+        out.push({ ...owner, filePath: op.path, toolName: 'rm', oldString: '', newString: '',
+          fileChangeKind: 'delete', oldStringKnown: false });
+      } else if (op.moveFrom) {
+        out.push({ ...owner, filePath: op.path, moveFrom: op.moveFrom, toolName: 'mv',
+          oldString: '', newString: '', fileChangeKind: 'update' });
       }
     }
     return;
