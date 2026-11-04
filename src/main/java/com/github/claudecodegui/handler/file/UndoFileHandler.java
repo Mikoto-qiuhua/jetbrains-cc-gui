@@ -254,7 +254,8 @@ public class UndoFileHandler extends BaseMessageHandler {
             throw new Exception("File not found: " + filePath);
         }
 
-        Document document = FileDocumentManager.getInstance().getDocument(file);
+        Document document = ApplicationManager.getApplication().runReadAction(
+                (Computable<Document>) () -> FileDocumentManager.getInstance().getDocument(file));
         if (document == null) {
             throw new Exception("Cannot get document for: " + filePath);
         }
@@ -333,8 +334,10 @@ public class UndoFileHandler extends BaseMessageHandler {
         }
         Path currentPath = Path.of(this.resolveFilePath(filePath));
         VirtualFile file = LocalFileSystem.getInstance().refreshAndFindFileByPath(WslPathUtil.toVfsPath(currentPath.toString()));
-        Charset charset = file == null || file.getCharset() == null ? StandardCharsets.UTF_8 : file.getCharset();
-        Document document = file == null ? null : FileDocumentManager.getInstance().getDocument(file);
+        Charset charset = ApplicationManager.getApplication().runReadAction((Computable<Charset>) () ->
+                file == null || file.getCharset() == null ? StandardCharsets.UTF_8 : file.getCharset());
+        Document document = file == null ? null : ApplicationManager.getApplication().runReadAction(
+                (Computable<Document>) () -> FileDocumentManager.getInstance().getDocument(file));
         // Disk reads stay off the EDT; document reads take a read lock.
         String currentContent = document != null
                 ? ApplicationManager.getApplication().runReadAction((Computable<String>) document::getText)
@@ -348,7 +351,8 @@ public class UndoFileHandler extends BaseMessageHandler {
             throw new IOException("Cannot restore rename: original path is occupied");
         }
         boolean rename = !originalPath.equals(currentPath);
-        if (rename && document != null && FileDocumentManager.getInstance().isDocumentUnsaved(document)) {
+        if (rename && document != null && ApplicationManager.getApplication().runReadAction(
+                (Computable<Boolean>) () -> FileDocumentManager.getInstance().isDocumentUnsaved(document))) {
             // Deleting the current path would silently discard the unsaved buffer,
             // and a later save would resurrect the renamed-away file.
             throw new IOException("Cannot undo the rename while the file has unsaved changes in the editor: " + currentPath);
