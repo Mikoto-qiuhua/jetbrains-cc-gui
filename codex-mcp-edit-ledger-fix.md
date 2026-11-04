@@ -84,7 +84,7 @@ Read access is allowed from inside read-action only
 | `webview/src/utils/shellFileOps.test.ts` | 新增 shell 删除、重命名、heredoc、通配符等解析用例 |
 | `webview/src/utils/toolConstants.test.ts` | 新增 MCP 工具名归一化用例 |
 | `ai-bridge/services/codex/codex-appserver-service.test.js` | 新增 fileChange 终态提升用例 |
-| `idea-claude-code-gui-0.6.3.zip` | 重新构建的可安装插件包 |
+| `idea-claude-code-gui-0.6.4.zip` | 重新构建的可安装插件包 |
 
 ## 4. 详细实现
 
@@ -410,12 +410,12 @@ gradle buildPlugin
 
 结果 `BUILD SUCCESSFUL`，产物：
 
-- `build/distributions/idea-claude-code-gui-0.6.3.zip`（约 27 MB）
-- 已复制到 `/workspace/idea-claude-code-gui-0.6.3.zip`
+- `build/distributions/idea-claude-code-gui-0.6.4.zip`（约 27 MB）
+- 已复制到 `/workspace/idea-claude-code-gui-0.6.4.zip`
 
 产物校验：
 
-- 从 zip 中提取 `idea-claude-code-gui/lib/idea-claude-code-gui-0.6.3.jar`；
+- 从 zip 中提取 `idea-claude-code-gui/lib/idea-claude-code-gui-0.6.4.jar`；
 - 确认其中包含 `webview/assets/index-*.js.gz`；
 - 解压后确认 bundle 内含 `pathInProject`、`create_new_file`，避免源码改了但包内是旧代码。
 
@@ -437,9 +437,12 @@ gradle buildPlugin
 
 ### 7.1 安装
 
-1. IDEA → Settings → Plugins → Installed，卸载旧版；
-2. 从磁盘安装 `/workspace/idea-claude-code-gui-0.6.3.zip`；
-3. 完全重启 IDEA。
+1. IDEA → Settings → Plugins → Installed，先卸载旧版（务必确认已卸载，不要只覆盖安装）；
+2. 从磁盘安装 `/workspace/idea-claude-code-gui-0.6.4.zip`；
+3. 完全重启 IDEA；
+4. 再次打开 Settings → Plugins，确认版本显示为 `0.6.4`。
+
+> 修复过程中曾沿用 `0.6.3` 版本号，IDEA 会把新旧包视为同一版本，可能继续加载旧 class，从而仍抛 `Read access is allowed from inside read-action only`。因此本轮已将版本提升到 `0.6.4`，用于区分修复前后的构建。
 
 ### 7.2 验证 exec 修改
 
@@ -539,5 +542,5 @@ webview/src/utils/shellFileOps.ts
 webview/src/utils/shellFileOps.test.ts
 webview/src/utils/toolConstants.ts
 webview/src/utils/toolConstants.test.ts
-idea-claude-code-gui-0.6.3.zip
+idea-claude-code-gui-0.6.4.zip
 ```
