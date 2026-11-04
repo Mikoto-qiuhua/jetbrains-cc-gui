@@ -79,6 +79,25 @@ export function computeDiffStats(
   return result;
 }
 
+const ABSOLUTE_PATH_PATTERN = /^(?:[a-zA-Z]:[\\/]|\\\\|\/)/;
+
+/** MCP calls carry their fields under input.arguments instead of at the top level. */
+function unwrapToolArguments(input: Record<string, unknown>): Record<string, unknown> {
+  const args = input.arguments;
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return input;
+  return { ...input, ...(args as Record<string, unknown>) };
+}
+
+/** JetBrains MCP identifies files by a project-relative pathInProject plus projectPath. */
+function resolvePathInProject(input: Record<string, unknown>): string | null {
+  const pathInProject = input.pathInProject;
+  if (typeof pathInProject !== 'string' || pathInProject.trim() === '') return null;
+  const projectPath = typeof input.projectPath === 'string' ? input.projectPath.trim() : '';
+  if (!projectPath || ABSOLUTE_PATH_PATTERN.test(pathInProject)) return pathInProject;
+  const separator = projectPath.includes('\\') ? '\\' : '/';
+  return `${projectPath.replace(/[\\/]+$/, '')}${separator}${pathInProject.replace(/^[\\/]+/, '')}`;
+}
+
 function extractFilePath(input: Record<string, unknown>): string | null {
   const pathValue = input.path;
   const filePathValue = input.file_path;
@@ -93,6 +112,7 @@ function extractFilePath(input: Record<string, unknown>): string | null {
     ?? (typeof targetFileValue === 'string' ? targetFileValue : undefined)
     ?? (typeof targetFileValue2 === 'string' ? targetFileValue2 : undefined)
     ?? (typeof notebookPathValue === 'string' ? notebookPathValue : undefined)
+    ?? resolvePathInProject(input)
     ?? null
   );
 }
@@ -115,6 +135,7 @@ function pairFromRecord(record: Record<string, unknown>): StringPair {
     ?? (typeof record.newString === 'string' ? record.newString : undefined)
     ?? (typeof record.newText === 'string' ? record.newText : undefined)
     ?? (typeof record.content === 'string' ? record.content : undefined)
+    ?? (typeof record.text === 'string' ? record.text : undefined)
     ?? '';
   const replaceAll =
     typeof record.replace_all === 'boolean'
@@ -217,11 +238,12 @@ interface FileToolInput {
 
 function collectLedgerOpsFromToolUse(params: FileToolInput, out: LedgerOp[]): void {
   const { sourceId, toolUseId, toolName, rawName, input, result, agentId } = params;
+  const toolInput = unwrapToolArguments(input);
   if (!isToolName(toolName, FILE_MODIFY_TOOL_NAMES)) {
     // Codex edits through exec scripts by default; the wrapped apply_patch is
     // only visible in the command, so read it instead of a dedicated tool call.
     if (!isToolName(toolName, SHELL_PATCH_TOOL_NAMES) || !isSuccessfulResult(result)) return;
-    for (const patch of readEmbeddedPatches(input)) {
+    for (const patch of readEmbeddedPatches(toolInput)) {
       for (const file of readPatchFiles({ patch })) {
         out.push(...collectPatchLedger(file, { sourceId, toolUseId, agentId }));
       }
@@ -229,24 +251,26 @@ function collectLedgerOpsFromToolUse(params: FileToolInput, out: LedgerOp[]): vo
     return;
   }
   if (isToolName(toolName, PATCH_TOOL_NAMES)) {
-    const outcome = readPatchOutcome(input, result);
+    const outcome = readPatchOutcome(toolInput, result);
     if (!outcome.isCompleted || outcome.isError || outcome.isUnknown) return;
-    for (const file of readPatchFiles(input)) {
+    for (const file of readPatchFiles(toolInput)) {
       out.push(...collectPatchLedger(file, { sourceId, toolUseId, agentId }));
     }
     return;
   }
   if (!isSuccessfulResult(result)) return;
 
-  const normalized = normalizeToolInput(rawName ?? toolName, input) as Record<string, unknown>;
+  const normalized = normalizeToolInput(rawName ?? toolName, toolInput) as Record<string, unknown>;
   const defaultPath = extractFilePath(normalized);
   const pairs = extractEditPairs(normalized);
   const lineInfo = getToolLineInfo(normalized, undefined, result);
+  // Creating a file has no replaced text, so it must stay visible even when blank.
+  const isCreate = toolName === 'create_new_file';
 
   for (const pair of pairs) {
     const filePath = pair.filePath || defaultPath;
     if (!filePath) continue;
-    if (pair.oldString === '' && pair.newString === '') continue;
+    if (!isCreate && pair.oldString === '' && pair.newString === '') continue;
 
     out.push({
       sourceId,
@@ -259,6 +283,7 @@ function collectLedgerOpsFromToolUse(params: FileToolInput, out: LedgerOp[]): vo
       agentId,
       lineStart: lineInfo.start,
       lineEnd: lineInfo.end,
+      ...(isCreate ? { fileChangeKind: 'add' as const } : {}),
     });
   }
 }

@@ -991,3 +991,135 @@ describe('useFileChanges', () => {
     expect(result.current.map((f) => f.filePath)).toEqual(['/proj/new.ts']);
   });
 });
+
+describe('JetBrains MCP file tools', () => {
+  beforeEach(() => {
+    clearDiffCache();
+    clearFileTouchRegistry();
+    localStorage.clear();
+  });
+
+  const mcpCall = (
+    id: string,
+    name: string,
+    args: Record<string, unknown>,
+  ): ClaudeMessage => assistantWithTools([{ id, name, input: { server: 'jetbrains', arguments: args } }]);
+
+  it('records replace_text_in_file with the resolved project path and replaceAll flag', () => {
+    const messages = [
+      mcpCall('mcp-edit', 'replace_text_in_file', {
+        pathInProject: 'src/app.ts',
+        oldText: 'const before = 1;',
+        newText: 'const after = 1;',
+        replaceAll: true,
+        projectPath: '/proj/',
+      }),
+      userWithResults([{ toolUseId: 'mcp-edit' }]),
+    ];
+    const { result } = renderHook(() =>
+      useFileChanges({ messages, getContentBlocks, findToolResult: makeFindToolResult(messages) }),
+    );
+
+    expect(result.current).toHaveLength(1);
+    expect(result.current[0]).toMatchObject({
+      filePath: '/proj/src/app.ts',
+      status: 'M',
+      additions: 1,
+      deletions: 1,
+    });
+    expect(result.current[0].operations[0]).toMatchObject({
+      toolName: 'replace_text_in_file',
+      oldString: 'const before = 1;',
+      newString: 'const after = 1;',
+      replaceAll: true,
+    });
+  });
+
+  it('records create_new_file as an added file with its text content', () => {
+    const messages = [
+      mcpCall('mcp-create', 'create_new_file', {
+        pathInProject: 'docs/new.md',
+        text: 'line one\nline two',
+        projectPath: '/proj',
+      }),
+      userWithResults([{ toolUseId: 'mcp-create' }]),
+    ];
+    const { result } = renderHook(() =>
+      useFileChanges({ messages, getContentBlocks, findToolResult: makeFindToolResult(messages) }),
+    );
+
+    expect(result.current).toHaveLength(1);
+    expect(result.current[0]).toMatchObject({
+      filePath: '/proj/docs/new.md',
+      status: 'A',
+      additions: 2,
+      deletions: 0,
+    });
+    expect(result.current[0].operations[0]).toMatchObject({
+      toolName: 'create_new_file',
+      oldString: '',
+      newString: 'line one\nline two',
+      fileChangeKind: 'add',
+    });
+  });
+
+  it('keeps an empty create_new_file visible in the edits list', () => {
+    const messages = [
+      mcpCall('mcp-empty', 'create_new_file', { pathInProject: 'empty.ts', projectPath: '/proj' }),
+      userWithResults([{ toolUseId: 'mcp-empty' }]),
+    ];
+    const { result } = renderHook(() =>
+      useFileChanges({ messages, getContentBlocks, findToolResult: makeFindToolResult(messages) }),
+    );
+
+    expect(result.current).toHaveLength(1);
+    expect(result.current[0]).toMatchObject({ filePath: '/proj/empty.ts', status: 'A', additions: 0, deletions: 0 });
+  });
+
+  it('joins Windows-style project paths with backslashes', () => {
+    const messages = [
+      mcpCall('mcp-win', 'replace_text_in_file', {
+        pathInProject: 'src\\win.ts',
+        oldText: 'a',
+        newText: 'b',
+        projectPath: 'C:\\proj',
+      }),
+      userWithResults([{ toolUseId: 'mcp-win' }]),
+    ];
+    const { result } = renderHook(() =>
+      useFileChanges({ messages, getContentBlocks, findToolResult: makeFindToolResult(messages) }),
+    );
+
+    expect(result.current[0].filePath).toBe('C:\\proj\\src\\win.ts');
+    expect(result.current[0].fileName).toBe('win.ts');
+  });
+
+  it('unwraps nested arguments for other MCP file tools', () => {
+    const messages = [
+      mcpCall('mcp-write', 'write_file', { file_path: '/proj/gen.ts', content: 'a\nb' }),
+      userWithResults([{ toolUseId: 'mcp-write' }]),
+    ];
+    const { result } = renderHook(() =>
+      useFileChanges({ messages, getContentBlocks, findToolResult: makeFindToolResult(messages) }),
+    );
+
+    expect(result.current[0]).toMatchObject({ filePath: '/proj/gen.ts', status: 'A', additions: 2 });
+  });
+
+  it('ignores failed MCP file operations', () => {
+    const messages = [
+      mcpCall('mcp-fail', 'replace_text_in_file', {
+        pathInProject: 'src/fail.ts',
+        oldText: 'a',
+        newText: 'b',
+        projectPath: '/proj',
+      }),
+      userWithResults([{ toolUseId: 'mcp-fail', isError: true }]),
+    ];
+    const { result } = renderHook(() =>
+      useFileChanges({ messages, getContentBlocks, findToolResult: makeFindToolResult(messages) }),
+    );
+
+    expect(result.current).toEqual([]);
+  });
+});
