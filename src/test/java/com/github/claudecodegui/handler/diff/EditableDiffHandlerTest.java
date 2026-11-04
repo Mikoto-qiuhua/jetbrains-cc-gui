@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 /** Keeps a native diff's filesystem identities steady while its UI decision is pending. */
@@ -71,6 +72,29 @@ public class EditableDiffHandlerTest {
     @Test
     public void keepsTheReviewedChatWithItsFailedApplyReceipt() throws Exception {
         this.assertNativeApplyKeepsItsOrigin("reviewed-chat", true);
+    }
+
+    /**
+     * An added file whose content drifted after creation must still open for review:
+     * its baseline is empty, so the recorded add content is irrelevant.
+     */
+    @Test
+    public void addedFileOpensEvenWhenItsContentDrifted() {
+        JsonArray operations = JsonParser.parseString("""
+                [{"fileChangeKind":"add","oldString":"","newString":"created\\n"}]
+                """).getAsJsonArray();
+        assertEquals("", EditableDiffHandler.computeOriginalContent(
+                true, true, "new.ts", "created and then edited\n", operations));
+    }
+
+    /** Modified files keep the strict baseline check that protects real edits. */
+    @Test
+    public void modifiedFileStillRejectsDivergedContent() {
+        JsonArray operations = JsonParser.parseString("""
+                [{"fileChangeKind":"update","patch":"@@ -1 +1 @@\\n-old\\n+new","oldString":"old","newString":"new"}]
+                """).getAsJsonArray();
+        assertThrows(IllegalArgumentException.class, () -> EditableDiffHandler.computeOriginalContent(
+                false, true, "file.ts", "user edit\n", operations));
     }
 
     private void assertNativeApplyKeepsItsOrigin(String originalSessionId, boolean failWrite) throws Exception {

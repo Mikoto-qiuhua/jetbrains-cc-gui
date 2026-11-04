@@ -130,11 +130,9 @@ public class EditableDiffHandler implements DiffActionHandler {
                 }
             }
 
-            String originalContent = nativePatch
-                    ? FileChangeUndoPlan.rebuild(filePath, vFile == null ? null : currentContent, operations).content()
-                    : isNewFile
-                    ? ""
-                    : ContentRebuildUtil.rebuildBeforeContent(currentContent, operations);
+            String originalContent = computeOriginalContent(
+                    isNewFile, nativePatch, filePath,
+                    nativePatch && vFile == null ? null : currentContent, operations);
             if (originalContent == null) {
                 originalContent = "";
             }
@@ -168,6 +166,26 @@ public class EditableDiffHandler implements DiffActionHandler {
             LOG.error("Failed to show editable diff: " + e.getMessage(), e);
             this.browserBridge.showErrorToast(ClaudeCodeGuiBundle.message("diff.openFailedDetail", e.getMessage()));
         }
+    }
+
+    /**
+     * Reconstructs the read-only baseline shown on the left side of the diff.
+     *
+     * An added file's baseline is empty by definition, so it must never depend on the
+     * recorded add content still matching what is on disk: the file may have collected
+     * later edits or formatting drift, and that would otherwise abort the review with
+     * "Added file has changed since the recorded edit". Undo keeps using the strict
+     * {@link FileChangeUndoPlan#rebuild} path, where that check protects real writes.
+     */
+    static String computeOriginalContent(boolean isNewFile, boolean nativePatch, String filePath,
+                                         String currentContent, JsonArray operations) {
+        if (!nativePatch) {
+            return isNewFile ? "" : ContentRebuildUtil.rebuildBeforeContent(currentContent, operations);
+        }
+        if (isNewFile) {
+            return "";
+        }
+        return FileChangeUndoPlan.rebuild(filePath, currentContent, operations).content();
     }
 
     private void handleDiffResult(DiffResult result, String filePath, String originalContent, boolean isNewFile) {

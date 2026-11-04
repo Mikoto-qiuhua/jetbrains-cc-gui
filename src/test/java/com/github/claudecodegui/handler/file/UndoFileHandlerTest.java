@@ -245,6 +245,23 @@ public class UndoFileHandlerTest {
         assertTrue(failure.getCause() instanceof IllegalArgumentException);
     }
 
+    /** Undoing an added file removes it without validating drifted recorded content. */
+    @Test
+    public void addedFileUndoDoesNotDependOnRecordedContent() {
+        JsonArray operations = JsonParser.parseString("""
+                [{"fileChangeKind":"add","oldString":"","newString":"created\\n"},
+                 {"fileChangeKind":"update","patch":"@@ -1 +1 @@\\n-created\\n+edited","oldString":"created","newString":"edited"}]
+                """).getAsJsonArray();
+        assertTrue(UndoFileHandler.canDeleteAddedFileDirectly("A", operations));
+        assertFalse(UndoFileHandler.canDeleteAddedFileDirectly("M", operations));
+
+        JsonArray renamed = JsonParser.parseString("""
+                [{"fileChangeKind":"add","moveFrom":"src/original.ts"}]
+                """).getAsJsonArray();
+        assertFalse("Renamed files still need the baseline restored first",
+                UndoFileHandler.canDeleteAddedFileDirectly("A", renamed));
+    }
+
     private void restore(Path current, Path original, String content) throws Exception {
         Method restore = UndoFileHandler.class.getDeclaredMethod("restoreFileBaseline", Path.class, Path.class, String.class, Charset.class);
         restore.setAccessible(true);

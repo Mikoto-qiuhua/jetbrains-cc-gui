@@ -305,6 +305,28 @@ public class UndoFileHandler extends BaseMessageHandler {
         return resolved;
     }
 
+    /**
+     * An added file without a rename is undone by deleting it, so its recorded add
+     * content never needs to match what is currently on disk. Renames keep the full
+     * reconstruction path because the baseline file must be restored first.
+     */
+    static boolean canDeleteAddedFileDirectly(String status, JsonArray operations) {
+        if (!"A".equals(status) || operations == null) {
+            return false;
+        }
+        for (var element : operations) {
+            if (!element.isJsonObject()) {
+                continue;
+            }
+            JsonObject op = element.getAsJsonObject();
+            if (op.has("moveFrom") && !op.get("moveFrom").isJsonNull()
+                    && !op.get("moveFrom").getAsString().isEmpty()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private boolean hasNativeOperations(JsonArray operations) {
         if (operations == null) {
             return false;
@@ -333,6 +355,13 @@ public class UndoFileHandler extends BaseMessageHandler {
             }
         }
         Path currentPath = Path.of(this.resolveFilePath(filePath));
+        if (canDeleteAddedFileDirectly(status, resolvedOps)) {
+            // An added file's pre-session state is "absent", so there is no baseline to
+            // reconstruct. Undo is a plain delete, and later content drift must not block
+            // it with "Added file has changed since the recorded edit".
+            this.deleteFile(currentPath.toString());
+            return;
+        }
         VirtualFile file = LocalFileSystem.getInstance().refreshAndFindFileByPath(WslPathUtil.toVfsPath(currentPath.toString()));
         Charset charset = ApplicationManager.getApplication().runReadAction((Computable<Charset>) () ->
                 file == null || file.getCharset() == null ? StandardCharsets.UTF_8 : file.getCharset());
