@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { sendBridgeEvent } from '../../utils/bridge';
+import { BRIDGE_READY_EVENT } from '../../utils/bridgeStartup';
 import { updateClaudeModelCapabilities } from '../../utils/claudeModelCapabilities';
 import type { ModelInfo } from '../../components/ChatInputBox/types';
 import {
@@ -136,6 +137,28 @@ export function useCliModels(currentProvider: string) {
   const [errorByProvider, setErrorByProvider] = useState<Record<string, string>>({});
   const pendingLoadRef = useRef<{ provider: string; timer: ReturnType<typeof setTimeout> } | null>(null);
   const nativeRequestRef = useRef<{ id: string; rows: unknown[]; cursors: Set<unknown> } | null>(null);
+  /** Provider whose first catalog request was deferred until the JCEF bridge exists. */
+  const pendingBridgeProviderRef = useRef<string | null>(null);
+  const bridgeReadyListenerRef = useRef<(() => void) | null>(null);
+  const beginLoadRef = useRef<(providerId: string) => void>(() => {});
+
+  // The page renders before JCEF injects window.sendToJava on onLoadEnd. Requests
+  // dispatched in that window are dropped silently, so remember the provider and
+  // send once the host announces the bridge is ready.
+  const deferUntilBridgeReady = useCallback((providerId: string) => {
+    pendingBridgeProviderRef.current = providerId;
+    if (bridgeReadyListenerRef.current) {
+      return;
+    }
+    const onReady = () => {
+      bridgeReadyListenerRef.current = null;
+      const pending = pendingBridgeProviderRef.current;
+      pendingBridgeProviderRef.current = null;
+      if (pending) beginLoadRef.current(pending);
+    };
+    bridgeReadyListenerRef.current = onReady;
+    window.addEventListener(BRIDGE_READY_EVENT, onReady, { once: true });
+  }, []);
 
   const clearPendingLoad = useCallback(() => {
     if (pendingLoadRef.current) {
@@ -145,6 +168,11 @@ export function useCliModels(currentProvider: string) {
   }, []);
 
   const beginLoad = useCallback((providerId: string) => {
+    if (!window.sendToJava) {
+      deferUntilBridgeReady(providerId);
+      return;
+    }
+    pendingBridgeProviderRef.current = null;
     clearPendingLoad();
     setLoadingProvider(providerId);
     setErrorByProvider((prev) => {
@@ -173,7 +201,18 @@ export function useCliModels(currentProvider: string) {
         setErrorByProvider((prev) => ({ ...prev, [providerId]: 'timeout' }));
       }, CLI_MODELS_TIMEOUT_MS),
     };
-  }, [clearPendingLoad]);
+  }, [clearPendingLoad, deferUntilBridgeReady]);
+
+  useEffect(() => {
+    beginLoadRef.current = beginLoad;
+  }, [beginLoad]);
+
+  useEffect(() => () => {
+    if (bridgeReadyListenerRef.current) {
+      window.removeEventListener(BRIDGE_READY_EVENT, bridgeReadyListenerRef.current);
+      bridgeReadyListenerRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     const handler = (dataOrStr: string | { provider?: string; models?: unknown; roles?: unknown; success?: boolean; error?: string; defaultModel?: unknown; replaceBuiltInOptions?: unknown; modelMapping?: unknown }) => {

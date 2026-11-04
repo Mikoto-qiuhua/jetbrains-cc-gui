@@ -4,6 +4,7 @@ import { __resetCliModelsCacheForTests, useCliModels, useOmpRoles } from './useC
 import { CODEX_MODELS, KIMI_MODELS, OMP_ROLE_MODELS, apply1MContextSuffix, modelSupports1MContext } from '../../components/ChatInputBox/types';
 import { installRuntimeProviderDispatchers } from '../../utils/runtimeProviderCapabilities';
 import { readClaudeModelMapping, writeClaudeModelMapping } from '../../utils/claudeModelMapping';
+import { BRIDGE_READY_EVENT } from '../../utils/bridgeStartup';
 
 const sendBridgeEventMock = vi.hoisted(() => vi.fn());
 
@@ -23,10 +24,13 @@ describe('useCliModels', () => {
     sendBridgeEventMock.mockClear();
     __resetCliModelsCacheForTests();
     installRuntimeProviderDispatchers();
+    // The real hook only dispatches once the JCEF bridge function exists.
+    window.sendToJava = vi.fn();
   });
 
   afterEach(() => {
     delete window.setCliModels;
+    delete window.sendToJava;
     __resetCliModelsCacheForTests();
     vi.useRealTimers();
   });
@@ -64,6 +68,19 @@ describe('useCliModels', () => {
 
   it('fetches the settings.json model picker for claude', () => {
     renderHook(() => useCliModels('claude'));
+    expect(sendBridgeEventMock).toHaveBeenCalledWith('get_cli_models', 'claude');
+  });
+
+  it('defers the startup catalog request until the JCEF bridge is injected', () => {
+    delete window.sendToJava;
+    renderHook(() => useCliModels('claude'));
+    expect(sendBridgeEventMock).not.toHaveBeenCalled();
+
+    act(() => {
+      window.sendToJava = vi.fn();
+      window.dispatchEvent(new Event(BRIDGE_READY_EVENT));
+    });
+
     expect(sendBridgeEventMock).toHaveBeenCalledWith('get_cli_models', 'claude');
   });
 
