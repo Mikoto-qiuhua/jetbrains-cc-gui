@@ -427,6 +427,30 @@ describe('MessageItem token usage display', () => {
     expect(screen.getByText('$0.0060')).toBeTruthy();
   });
 
+  it('shows token usage when the turn duration was not stamped', () => {
+    const message: ClaudeMessage = {
+      type: 'assistant',
+      content: 'Hello',
+      raw: {
+        message: {
+          content: [{ type: 'text', text: 'Hello' }],
+        },
+        turnUsage: {
+          input_tokens: 37,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 36310,
+          output_tokens: 353,
+        },
+      } as any,
+    };
+
+    renderMessageItem(message, { detailedOutputEnabled: true });
+
+    // No duration is available, but the backend-stamped usage must still render.
+    expect(screen.queryByText('本次耗时')).toBeNull();
+    expect(screen.getByText('输入 36.3K（缓存命中 36.3K，100%） / 输出 353')).toBeTruthy();
+  });
+
   it('counts cache tokens in the input total and details them in the tooltip', () => {
     const message: ClaudeMessage = {
       type: 'assistant',

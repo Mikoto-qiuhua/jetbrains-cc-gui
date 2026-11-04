@@ -609,19 +609,31 @@ public class CodexMessageHandler implements MessageCallback {
         java.util.List<Message> messages = state.getMessagesReference();
         for (int i = messages.size() - 1; i >= 0; i--) {
             Message msg = messages.get(i);
-            if (msg.type == Message.Type.ASSISTANT && msg.raw != null) {
-                if (usage != null) {
-                    msg.raw.add("usage", usage);
-                }
-                if (turnUsage != null) {
-                    msg.raw.add("turnUsage", turnUsage);
-                    Double turnCostUsd = UsageCostCalculator.calculateTurnCostUsd("codex", turnUsage, state.getModel());
-                    if (turnCostUsd != null) {
-                        msg.raw.addProperty("turnCostUsd", turnCostUsd);
-                    }
-                }
-                return true;
+            if (msg.type != Message.Type.ASSISTANT) {
+                continue;
             }
+            // A delta-created placeholder assistant can have a null raw (see
+            // new Message(Type, content)). Do not skip it: stamping usage on an
+            // earlier assistant would show this turn's cost on a stale bubble,
+            // and skipping every raw-less row drops the metrics entirely.
+            if (msg.raw == null) {
+                if (usage == null && turnUsage == null) {
+                    return false;
+                }
+                msg.raw = new com.google.gson.JsonObject();
+                msg.raw.addProperty("type", "assistant");
+            }
+            if (usage != null) {
+                msg.raw.add("usage", usage);
+            }
+            if (turnUsage != null) {
+                msg.raw.add("turnUsage", turnUsage);
+                Double turnCostUsd = UsageCostCalculator.calculateTurnCostUsd("codex", turnUsage, state.getModel());
+                if (turnCostUsd != null) {
+                    msg.raw.addProperty("turnCostUsd", turnCostUsd);
+                }
+            }
+            return true;
         }
         return false;
     }

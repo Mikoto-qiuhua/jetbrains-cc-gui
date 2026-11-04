@@ -1280,14 +1280,24 @@ export class CodexAppServerService extends EventEmitter {
     this.completedTurns.add(`${threadId}:${turnId}`);
     if (this.completedTurns.size > 2048) this.completedTurns.delete(this.completedTurns.values().next().value);
     if (operation) {
-      this.#emitOperationMarker(operation, '[STREAM_END]');
-      if (params?.turn?.usage) {
+      // Usage normally arrives first via thread/tokenUsage/updated and is emitted
+      // there. Emit it BEFORE STREAM_END so the Java handler stamps turnUsage on
+      // the final assistant snapshot that the stream-end flush carries. Some
+      // native versions also put usage on turn.completed (or at the top level),
+      // so accept those shapes when tokenUsage never arrived.
+      const completedUsage = params?.turn?.usage ?? params?.usage;
+      if (!operation.turnUsage && completedUsage) {
+        operation.turnUsage = normalizeUsage(completedUsage);
+      }
+      if (operation.turnUsage && !operation.resultSent) {
         this.#emitOperationMarker(operation, `[MESSAGE] ${JSON.stringify({
           type: 'result',
-          usage: normalizeUsage(params.turn.usage),
+          usage: operation.turnUsage,
           session_id: threadId,
         })}`);
+        operation.resultSent = true;
       }
+      this.#emitOperationMarker(operation, '[STREAM_END]');
     }
     if (operation && !operation.settled) {
       const outcome = status === 'completed' ? 'completed' : status === 'interrupted' ? 'interrupted' : 'failed';
@@ -1416,6 +1426,9 @@ export class CodexAppServerService extends EventEmitter {
     const turnId = params?.turnId ?? params?.turn_id ?? null;
     // Cold resume replays the previous turn's usage after turn/start has been written.
     // Statistics and plan/diff snapshots cannot establish a new operation's native identity.
+    // Match by the already-bound native turn only: turn/started owns the binding, and
+    // binding from a replayed usage snapshot would attach the new operation to the
+    // previous turn's identity.
     const operation = threadId && turnId ? [...this.operations.values()].find(candidate =>
       candidate.threadId === threadId && candidate.nativeTurnId === turnId) : null;
     if (operation && method === 'turn/plan/updated') {
@@ -1445,6 +1458,7 @@ export class CodexAppServerService extends EventEmitter {
             usage: operation.turnUsage,
             session_id: threadId,
           })}`);
+          operation.resultSent = true;
         }
         if (total && threadId) this.threadTokenTotals.set(threadId, total);
       }

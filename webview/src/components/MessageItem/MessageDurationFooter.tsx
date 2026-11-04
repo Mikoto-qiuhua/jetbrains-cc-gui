@@ -95,11 +95,20 @@ export const MessageDurationFooter = memo(function MessageDurationFooter({
   detailedOutputEnabled,
   t,
 }: MessageDurationFooterProps) {
-  if (message.type !== 'assistant' || isMessageStreaming || typeof message.durationMs !== 'number') {
+  if (message.type !== 'assistant' || isMessageStreaming) {
     return null;
   }
 
+  // The duration is stamped by the frontend when the stream ends, so it can be
+  // missing (e.g. a turn that never emitted STREAM_START, or a snapshot that
+  // replaced the bubble after finalization). Token usage is stamped by the
+  // backend and independent of that timing — never hide the whole footer just
+  // because the duration is unavailable.
   const tokenInfo = extractTokenUsage(message.raw);
+  const durationMs = typeof message.durationMs === 'number' ? message.durationMs : undefined;
+  if (durationMs === undefined && tokenInfo == null) {
+    return null;
+  }
   const cacheHitRatio = detailedOutputEnabled && tokenInfo ? formatCacheHitRatio(tokenInfo) : null;
   const cacheHitLabel = tokenInfo && cacheHitRatio
     ? t('chat.cacheHitsWithRatio', {
@@ -111,12 +120,16 @@ export const MessageDurationFooter = memo(function MessageDurationFooter({
   return (
     <div className="message-duration">
       <span className="message-duration-inner">
-        <span className="message-duration-flag codicon codicon-clock"></span>
-        <span className="message-duration-cost">{t('chat.totalDuration')}</span>
-        <span className="message-duration-value">{formatDurationMs(message.durationMs)}</span>
+        {durationMs !== undefined && (
+          <>
+            <span className="message-duration-flag codicon codicon-clock"></span>
+            <span className="message-duration-cost">{t('chat.totalDuration')}</span>
+            <span className="message-duration-value">{formatDurationMs(durationMs)}</span>
+          </>
+        )}
         {tokenInfo && (
           <>
-            <span className="message-duration-separator">·</span>
+            {durationMs !== undefined && <span className="message-duration-separator">·</span>}
             <span
               className="message-duration-tokens"
               title={t('chat.tokenUsageDetail', {

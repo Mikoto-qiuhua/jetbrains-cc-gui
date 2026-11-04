@@ -53,6 +53,45 @@ describe('Codex native snapshots at stream end', () => {
     if (window.__stallWatchdogInterval != null) clearInterval(window.__stallWatchdogInterval);
     vi.useRealTimers();
   });
+  it('keeps duration and turn metrics when a post-turn refresh rotates the uuid', () => {
+    const state = harness();
+    const final = snapshot('完成');
+    (final.raw as any).turnUsage = {
+      input_tokens: 30,
+      cache_read_input_tokens: 10,
+      output_tokens: 20,
+    };
+    (final.raw as any).turnCostUsd = 0.002;
+    window.updateMessages!(JSON.stringify([user, final]));
+    vi.advanceTimersByTime(16);
+    window.onStreamEnd!();
+
+    const live = state.getMessages().at(-1)!;
+    expect(typeof live.durationMs).toBe('number');
+    expect(live.raw).toMatchObject({ turnUsage: { input_tokens: 30 }, turnCostUsd: 0.002 });
+
+    // History refresh: same turn, rotated uuid, no live metrics.
+    window.updateMessages!(JSON.stringify([user, snapshot('完成', 'rotated')]));
+    vi.advanceTimersByTime(16);
+    const refreshed = state.getMessages().at(-1)!;
+    expect(typeof refreshed.durationMs).toBe('number');
+    expect(refreshed.durationMs).toBe(live.durationMs);
+    expect(refreshed.raw).toMatchObject({ turnUsage: { input_tokens: 30 }, turnCostUsd: 0.002 });
+  });
+  it('does not leak the ended turn metrics into a new turn', () => {
+    const state = harness();
+    window.updateMessages!(JSON.stringify([user, snapshot('第一轮完成')]));
+    vi.advanceTimersByTime(16);
+    window.onStreamEnd!();
+    const ended = state.getMessages().at(-1)!;
+    expect(typeof ended.durationMs).toBe('number');
+
+    act(() => window.onStreamStart!());
+    window.updateMessages!(JSON.stringify([user, snapshot('第一轮完成'), snapshot('第二轮回答', 'turn-2')]));
+    vi.advanceTimersByTime(16);
+    const nextTurn = state.getMessages().at(-1)!;
+    expect(nextTurn.durationMs).toBeUndefined();
+  });
   it('accepts text-only snapshots after the first character and retains the complete final text', () => {
     const state = harness();
     window.updateMessages!(JSON.stringify([user, snapshot('修')]));

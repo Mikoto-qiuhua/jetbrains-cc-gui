@@ -139,19 +139,62 @@ export function registerMessageCallbacks(
     return ensureStreamingAssistantPreserved(prevList, withoutDuplicateToolTail);
   };
 
+  /**
+   * Carry backend-stamped per-turn metrics (turnUsage / turnCostUsd) from an
+   * older snapshot row onto a newer one that lost them (history reload).
+   */
+  const inheritTurnMetrics = (
+    raw: ClaudeMessage['raw'],
+    source: ClaudeMessage | undefined,
+  ): ClaudeMessage['raw'] => {
+    if (!source || raw == null || typeof raw !== 'object') return raw;
+    const sourceRaw = source.raw;
+    if (sourceRaw == null || typeof sourceRaw !== 'object') return raw;
+    const src = sourceRaw as Record<string, unknown>;
+    const target = raw as Record<string, unknown>;
+    if (target.turnUsage != null || src.turnUsage == null) return raw;
+    return {
+      ...target,
+      turnUsage: src.turnUsage,
+      ...(target.turnCostUsd == null && src.turnCostUsd != null ? { turnCostUsd: src.turnCostUsd } : {}),
+    } as ClaudeMessage['raw'];
+  };
+
   const acceptNativeSnapshots = (
     prev: ClaudeMessage[], parsed: ClaudeMessage[], streaming: boolean, turnId: number,
   ): ClaudeMessage[] => {
     const lastAssistant = findLastAssistantIndex(parsed);
     const previousById = new Map(prev.map(message => [getRawUuid(message), message]));
+    // The backend refreshes the transcript after a turn settles (history reload).
+    // Those rows lose the frontend-stamped `durationMs` and the backend-stamped
+    // `turnUsage`/`turnCostUsd`, and Java's MessageMerger may rotate the uuid, so
+    // the uuid lookup above misses. Carry the just-ended turn's metrics onto the
+    // trailing assistant while no newer turn has started.
+    const prevLastAssistantIndex = findLastAssistantIndex(prev);
+    const prevLastAssistant = prev[prevLastAssistantIndex];
+    const endedTurnId = window.__lastStreamEndedTurnId;
+    // Only when the ended turn's assistant is still the trailing entry: a newer
+    // user message means a new turn is starting and must not inherit these metrics.
+    const inheritEndedTurn = !streaming
+      && endedTurnId != null
+      && prevLastAssistantIndex === prev.length - 1
+      && prevLastAssistant?.type === 'assistant'
+      && prevLastAssistant.__turnId === endedTurnId;
     const next = parsed.map((message, index) => {
       if (message.type !== 'assistant') return message;
       const id = getRawUuid(message);
-      const previous = id ? previousById.get(id) : undefined;
+      const matched = id ? previousById.get(id) : undefined;
+      const inherited = matched ?? (inheritEndedTurn && index === lastAssistant ? prevLastAssistant : undefined);
+      const inheritedTurnId = inherited?.__turnId;
       return {
         ...message,
-        ...(previous?.durationMs != null ? { durationMs: previous.durationMs } : {}),
-        ...(streaming && index === lastAssistant ? { __turnId: turnId } : {}),
+        raw: inherited === prevLastAssistant ? inheritTurnMetrics(message.raw, inherited) : message.raw,
+        ...(inherited?.durationMs != null ? { durationMs: inherited.durationMs } : {}),
+        ...(streaming && index === lastAssistant
+          ? { __turnId: turnId }
+          : inheritedTurnId != null && inherited === prevLastAssistant
+            ? { __turnId: inheritedTurnId }
+            : {}),
         isStreaming: streaming && index === lastAssistant,
       };
     });

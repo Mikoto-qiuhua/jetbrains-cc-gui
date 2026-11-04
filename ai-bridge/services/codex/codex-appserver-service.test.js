@@ -868,6 +868,51 @@ test('native token snapshots keep context and turn accounting separate', async (
   } finally { await service.resetRuntime(); }
 });
 
+test('turn completion emits usage before the stream end marker', async () => {
+  const markers = [];
+  const { service, getPeer } = makeService({ scenario: 'never-respond',
+    serviceOpts: { emitMarker: (_operation, marker) => markers.push(marker) },
+  });
+  try {
+    const operation = service.enqueueOperation({ kind: 'send', markerPayload: { input: [] } });
+    await waitFor(() => operation.nativeTurnId);
+    getPeer().notify({ method: 'turn/completed', params: {
+      threadId: operation.threadId,
+      turn: { id: operation.nativeTurnId, status: 'completed',
+        usage: { inputTokens: 70, outputTokens: 12, cachedInputTokens: 20 } },
+    } });
+    const outcome = await operation.promise;
+    assert.equal(outcome.outcome, 'completed');
+    const resultIndex = markers.findIndex((marker) => String(marker).includes('"type":"result"'));
+    const endIndex = markers.indexOf('[STREAM_END]');
+    assert.ok(resultIndex >= 0, 'usage result marker emitted from turn/completed');
+    assert.ok(endIndex > resultIndex, 'usage is emitted before STREAM_END');
+    assert.match(markers[resultIndex], /"input_tokens":70/);
+  } finally { await service.resetRuntime(); }
+});
+
+test('does not duplicate the usage result when tokenUsage already delivered it', async () => {
+  const markers = [];
+  const { service, getPeer } = makeService({ scenario: 'never-respond',
+    serviceOpts: { emitMarker: (_operation, marker) => markers.push(marker) },
+  });
+  try {
+    const operation = service.enqueueOperation({ kind: 'send', markerPayload: { input: [] } });
+    await waitFor(() => operation.nativeTurnId);
+    getPeer().notify({ method: 'thread/tokenUsage/updated', params: {
+      threadId: operation.threadId, turnId: operation.nativeTurnId,
+      tokenUsage: { last: { inputTokens: 50, outputTokens: 10, cachedInputTokens: 15 }, modelContextWindow: 1000 },
+    } });
+    getPeer().notify({ method: 'turn/completed', params: {
+      threadId: operation.threadId, turn: { id: operation.nativeTurnId, status: 'completed',
+        usage: { inputTokens: 70, outputTokens: 12, cachedInputTokens: 20 } },
+    } });
+    await operation.promise;
+    const resultCount = markers.filter((marker) => String(marker).includes('"type":"result"')).length;
+    assert.equal(resultCount, 1, 'usage is reported exactly once per turn');
+  } finally { await service.resetRuntime(); }
+});
+
 test('native live events and cached items use the same privacy projection as markers', async () => {
   const { service, getPeer, events } = makeService({ scenario: 'never-respond', serviceOpts: {
     privacyIndex: { redact: (value) => JSON.parse(JSON.stringify(value).replaceAll('synthetic-secret', '[redacted]')) },

@@ -15,12 +15,37 @@ import java.util.List;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 /**
  * Unit tests for translating Codex bridge events into provider-neutral session state.
  */
 public class CodexMessageHandlerTest {
+    /** Stamps turn usage on a delta-created assistant row that has no raw object yet. */
+    @Test
+    public void attachesTurnUsageToRawlessStreamingAssistant() {
+        SessionState state = new SessionState();
+        CodexMessageHandler handler = new CodexMessageHandler(state, new CallbackHandler());
+        handler.onMessage("stream_start", "");
+        handler.onMessage("content_delta", "done");
+        Message assistant = state.getMessages().get(state.getMessages().size() - 1);
+        assertEquals(Message.Type.ASSISTANT, assistant.type);
+        assertNull("delta placeholders start without raw JSON", assistant.raw);
+
+        handler.onMessage("result", """
+                {"usage":{"input_tokens":70,"output_tokens":12,"cache_read_input_tokens":20},"session_id":"t"}
+                """);
+
+        assertNotNull("usage must materialize the raw object", assistant.raw);
+        assertTrue(assistant.raw.has("turnUsage"));
+        // OpenAI counts cached tokens inside input_tokens; turnUsage excludes them.
+        assertEquals(50, assistant.raw.getAsJsonObject("turnUsage").get("input_tokens").getAsInt());
+        assertEquals(20, assistant.raw.getAsJsonObject("turnUsage").get("cache_read_input_tokens").getAsInt());
+        assertEquals(12, assistant.raw.getAsJsonObject("turnUsage").get("output_tokens").getAsInt());
+    }
+
     /** Errors belong to the submitted client identity even when a later user is already present. */
     @Test
     public void startupErrorKeepsTheSubmittingClientIdentity() {
