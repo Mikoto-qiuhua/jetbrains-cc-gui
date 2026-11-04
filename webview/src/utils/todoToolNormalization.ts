@@ -46,20 +46,17 @@ export function extractTodosFromToolUse(block: ClaudeContentBlock): TodoItem[] |
   const toolName = normalizeToolName(block.name ?? '');
   const input = (block.input ?? {}) as ToolInput;
 
-  if (toolName === 'todowrite') {
-    if (!Array.isArray(input.todos)) {
+  if (toolName === 'todowrite' || toolName === 'update_plan') {
+    // Claude sends todowrite{todos}; Codex live markers send todowrite{plan}
+    // (see #emitPlanMarker in codex-appserver-service), while Codex history
+    // replay sends update_plan{plan}. Accept both shapes under either name.
+    const entries = Array.isArray(input.todos) ? input.todos
+      : Array.isArray(input.plan) ? input.plan
+        : null;
+    if (!entries) {
       return null;
     }
-    return input.todos
-      .map((item) => (item && typeof item === 'object' ? normalizeTodoItem(item as RawTodoItem) : null))
-      .filter((item): item is TodoItem => item !== null);
-  }
-
-  if (toolName === 'update_plan') {
-    if (!Array.isArray(input.plan)) {
-      return null;
-    }
-    return input.plan
+    return entries
       .map((item) => (item && typeof item === 'object' ? normalizeTodoItem(item as RawTodoItem) : null))
       .filter((item): item is TodoItem => item !== null);
   }

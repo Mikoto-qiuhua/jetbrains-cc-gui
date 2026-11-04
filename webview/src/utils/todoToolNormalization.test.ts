@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { extractAccumulatedTasks } from './todoToolNormalization';
+import { extractAccumulatedTasks, extractTodosFromToolUse } from './todoToolNormalization';
 import type { ClaudeMessage, ClaudeContentBlock } from '../types';
 
 // getContentBlocks stub: assistant blocks are stashed on a test-only field.
@@ -25,6 +25,36 @@ const userResults = (
       ...(toolUseResult !== undefined ? { toolUseResult } : {}),
     },
   }) as ClaudeMessage;
+
+describe('extractTodosFromToolUse', () => {
+  it('reads the Codex live plan marker shape todowrite{plan:[{step,status}]}', () => {
+    const block = toolUse('codex-plan', 'todowrite', {
+      plan: [
+        { step: 'Inspect existing code', status: 'in_progress' },
+        { step: 'Implement change', status: 'pending' },
+      ],
+    });
+    expect(extractTodosFromToolUse(block)).toEqual([
+      { content: 'Inspect existing code', status: 'in_progress' },
+      { content: 'Implement change', status: 'pending' },
+    ]);
+  });
+
+  it('still reads Claude todowrite{todos} and Codex history update_plan{plan}', () => {
+    expect(extractTodosFromToolUse(toolUse('t1', 'todowrite', {
+      todos: [{ content: 'Claude step', status: 'completed' }],
+    }))).toEqual([{ content: 'Claude step', status: 'completed' }]);
+    expect(extractTodosFromToolUse(toolUse('t2', 'update_plan', {
+      plan: [{ step: 'Codex step', status: 'pending' }],
+    }))).toEqual([{ content: 'Codex step', status: 'pending' }]);
+  });
+
+  it('treats an empty plan snapshot as an explicit clear and ignores unknown shapes', () => {
+    expect(extractTodosFromToolUse(toolUse('t3', 'todowrite', { plan: [] }))).toEqual([]);
+    expect(extractTodosFromToolUse(toolUse('t4', 'todowrite', {}))).toBeNull();
+    expect(extractTodosFromToolUse({ type: 'text', text: 'hi' } as ClaudeContentBlock)).toBeNull();
+  });
+});
 
 describe('extractAccumulatedTasks', () => {
   it('resolves the real task id from a single tool_result toolUseResult.task.id', () => {

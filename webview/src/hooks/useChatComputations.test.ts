@@ -167,6 +167,25 @@ describe('deriveTodosForTurn', () => {
     ]);
   });
 
+  it('shows the live Codex plan marker shape (todowrite{plan}) in the current turn', () => {
+    const messages = [
+      user('implement the fix'),
+      assistant([toolUse('live-plan', 'todowrite', {
+        plan: [
+          { step: 'Inspect', status: 'completed' },
+          { step: 'Implement', status: 'in_progress' },
+          { step: 'Verify', status: 'pending' },
+        ],
+      })]),
+    ];
+
+    expect(deriveTodosForTurn(messages, getContentBlocks, true, 'codex')).toEqual([
+      { content: 'Inspect', status: 'completed' },
+      { content: 'Implement', status: 'in_progress' },
+      { content: 'Verify', status: 'pending' },
+    ]);
+  });
+
   it('does not carry completed structured tasks into a new user turn', () => {
     const messages = [
       user('previous request'),
