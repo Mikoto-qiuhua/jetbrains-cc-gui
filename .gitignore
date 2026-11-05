@@ -90,3 +90,6 @@ logs/*.log
 
 # Playwright MCP local test artifacts
 .playwright-mcp/
+
+# Built plugin archives are published as GitHub Release assets, not committed
+*.zip
