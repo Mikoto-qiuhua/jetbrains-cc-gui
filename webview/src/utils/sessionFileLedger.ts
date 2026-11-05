@@ -96,7 +96,7 @@ export function applySearchReplace(
   return content.slice(0, index) + newString + content.slice(index + oldString.length);
 }
 
-function isWriteTool(toolName: string): boolean {
+export function isWriteTool(toolName: string): boolean {
   return WRITE_TOOL_NAMES.has(normalizeToolName(toolName));
 }
 
@@ -350,8 +350,10 @@ export function buildSessionFileLedger(ops: LedgerOp[]): SessionFileLedgerEntry[
     const multiAgent = agentIds.length >= 2;
     const status = determineStatus(fileOps, reconstructed.fullyApplied ? baseline : fileOps[0]?.oldString ?? '');
     // A file edited and then restored to its session baseline has no reviewable
-    // diff. Added or deleted files stay visible even when their body is empty.
-    if (status === 'M' && reconstructed.fullyApplied && !blankLineOnly && baseline === current) return;
+    // diff. Added or deleted files stay visible even when their body is empty,
+    // and an unknown prior content cannot prove that the file was restored.
+    const baselineKnown = fileOps.every(op => op.oldStringKnown !== false);
+    if (status === 'M' && baselineKnown && reconstructed.fullyApplied && !blankLineOnly && baseline === current) return;
     const firstLine = fileOps.find((o) => typeof o.lineStart === 'number');
 
     entries.push({

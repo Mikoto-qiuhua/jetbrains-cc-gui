@@ -759,9 +759,11 @@ describe('useFileChanges', () => {
     expect(result.current[0]).toMatchObject({
       filePath: '/proj/src/app.ts', status: 'M', additions: 1, deletions: 1,
     });
+    // Reversing replaceAll would also rewrite text that predates this edit.
     expect(result.current[0].operations[0]).toMatchObject({
-      oldString: 'before', newString: 'after', replaceAll: true,
+      oldString: 'before', newString: 'after', fileChangeKind: 'update',
     });
+    expect(result.current[0].operations[0].replaceAll).toBeUndefined();
   });
 
   it('adds JetBrains MCP create_new_file with its text body', () => {
@@ -851,7 +853,9 @@ describe('useFileChanges', () => {
       }),
     );
 
-    expect(result.current[0]).toMatchObject({ filePath: '/proj/generic.ts', status: 'A', additions: 1 });
+    expect(result.current[0]).toMatchObject({ filePath: '/proj/generic.ts', status: 'M', additions: 1 });
+    expect(result.current[0].operations[0].fileChangeKind).toBe('update');
+    expect(result.current[0].operations[0].oldStringKnown).toBe(false);
   });
 
   it('ignores failed JetBrains MCP file operations', () => {
@@ -873,6 +877,90 @@ describe('useFileChanges', () => {
     );
 
     expect(result.current).toEqual([]);
+  });
+
+  it('counts MCP apply_patch edits whose patch is wrapped in arguments', () => {
+    const patch = '*** Begin Patch\n*** Update File: src/app.ts\n@@\n-before\n+after\n*** End Patch';
+    const messages: ClaudeMessage[] = [
+      assistantWithTools([{
+        id: 'jb-patch',
+        name: 'mcp__jetbrains__apply_patch',
+        input: { server: 'jetbrains', arguments: { input: patch, projectPath: '/proj' } },
+      }]),
+      userWithResults([{ toolUseId: 'jb-patch' }]),
+    ];
+
+    const { result } = renderHook(() =>
+      useFileChanges({
+        messages,
+        getContentBlocks,
+        findToolResult: makeFindToolResult(messages),
+      }),
+    );
+
+    expect(result.current).toHaveLength(1);
+    expect(result.current[0]).toMatchObject({ filePath: '/proj/src/app.ts', status: 'M', additions: 1, deletions: 1 });
+  });
+
+  it('keeps one row when MCP calls spell the same path with and without a project root', () => {
+    const messages: ClaudeMessage[] = [
+      assistantWithTools([{
+        id: 'create-relative',
+        name: 'create_new_file',
+        input: { pathInProject: 'docs/notes.md', text: 'line1\n' },
+      }]),
+      userWithResults([{ toolUseId: 'create-relative' }]),
+      assistantWithTools([{
+        id: 'replace-absolute',
+        name: 'mcp__jetbrains__replace_text_in_file',
+        input: { server: 'jetbrains', arguments: { pathInProject: 'docs/notes.md', projectPath: '/proj',
+          oldText: 'line1', newText: 'line1\nline2' } },
+      }]),
+      userWithResults([{ toolUseId: 'replace-absolute' }]),
+    ];
+
+    const { result } = renderHook(() =>
+      useFileChanges({
+        messages,
+        getContentBlocks,
+        findToolResult: makeFindToolResult(messages),
+      }),
+    );
+
+    expect(result.current).toHaveLength(1);
+    expect(result.current[0]).toMatchObject({ filePath: '/proj/docs/notes.md', status: 'A', additions: 2 });
+  });
+
+  it('accumulates content added after a file was created in an earlier turn', () => {
+    const messages: ClaudeMessage[] = [
+      assistantWithTools([{
+        id: 'turn-create',
+        name: 'mcp__jetbrains__create_new_file',
+        input: { server: 'jetbrains', arguments: { pathInProject: 'docs/notes.md', projectPath: '/proj', text: 'line1\n' } },
+      }]),
+      userWithResults([{ toolUseId: 'turn-create' }]),
+      { type: 'user', content: 'continue' } as ClaudeMessage,
+      assistantWithTools([{
+        id: 'turn-append',
+        name: 'mcp__jetbrains__replace_text_in_file',
+        input: { server: 'jetbrains', arguments: { pathInProject: 'docs/notes.md', projectPath: '/proj',
+          oldText: 'line1', newText: 'line1\nline2' } },
+      }]),
+      userWithResults([{ toolUseId: 'turn-append' }]),
+    ];
+
+    const { result } = renderHook(() =>
+      useFileChanges({
+        messages,
+        getContentBlocks,
+        findToolResult: makeFindToolResult(messages),
+        currentSessionId: 'session-created-then-edited',
+      }),
+    );
+
+    expect(result.current).toHaveLength(1);
+    expect(result.current[0]).toMatchObject({ status: 'A', additions: 2, deletions: 0 });
+    expect(result.current[0].operations).toHaveLength(2);
   });
 
   it('hides a file created and then deleted within the session', () => {

@@ -5,19 +5,25 @@ import type { SubagentHistoryResponse } from '../types/subagent';
 import {
   BASH_TOOL_NAMES,
   FILE_MODIFY_TOOL_NAMES,
-  MCP_FILE_MODIFY_TOOL_NAMES,
   AGENT_TOOL_NAMES,
   isToolName,
   normalizeToolName,
 } from '../utils/toolConstants';
 import { normalizeToolInput } from '../utils/toolInputNormalization';
 import { readEmbeddedPatches, readPatchFiles, readPatchOutcome } from '../utils/codexPatch';
+import {
+  isMcpToolCall,
+  patchFileInProject,
+  readPathInProject,
+  unwrapMcpArguments,
+} from '../utils/mcpFileToolInput';
 import { collectPatchLedger } from '../utils/patchLedger';
 import { PATCH_TOOL_NAMES } from '../utils/toolConstants';
-import { getToolLineInfo } from '../utils/toolPresentation';
+import { getToolLineInfo, isAbsolutePath } from '../utils/toolPresentation';
 import {
   buildSessionFileLedger,
   diffLineStats,
+  isWriteTool,
   ledgerEntriesToSummaries,
   sameLedgerOps,
   type LedgerOp,
@@ -83,27 +89,7 @@ export function computeDiffStats(
 /** Shell/exec blocks also carry apply_patch scripts; they are not file tools themselves. */
 const SHELL_PATCH_TOOL_NAMES = new Set([...BASH_TOOL_NAMES, 'exec']);
 
-const ABSOLUTE_PATH_PATTERN = /^(?:\/|[A-Za-z]:[\\/]|\\\\)/;
-
-/** MCP tools wrap real arguments one level down; keep the outer fields for server metadata. */
-function unwrapToolArguments(input: Record<string, unknown>): Record<string, unknown> {
-  const args = input.arguments;
-  if (!args || typeof args !== 'object' || Array.isArray(args)) return input;
-  return { ...input, ...(args as Record<string, unknown>) };
-}
-
-/** JetBrains MCP addresses files relative to the project root. */
-function resolvePathInProject(input: Record<string, unknown>): string | null {
-  const pathInProject = input.pathInProject;
-  if (typeof pathInProject !== 'string' || pathInProject.trim() === '') return null;
-  const projectPath = typeof input.projectPath === 'string' ? input.projectPath.trim() : '';
-  if (!projectPath || ABSOLUTE_PATH_PATTERN.test(pathInProject)) return pathInProject;
-  const separator = projectPath.includes('\\') ? '\\' : '/';
-  return `${projectPath.replace(/[\\/]+$/, '')}${separator}${pathInProject.replace(/^[\\/]+/, '')}`;
-}
-
 function extractFilePath(input: Record<string, unknown>): string | null {
-  const pathInProjectValue = resolvePathInProject(input);
   const pathValue = input.path;
   const filePathValue = input.file_path;
   const targetFileValue = input.target_file;
@@ -111,14 +97,13 @@ function extractFilePath(input: Record<string, unknown>): string | null {
   const notebookPathValue = input.notebook_path;
 
   return (
-    pathInProjectValue
-    ?? (typeof input.filePath === 'string' ? input.filePath : undefined)
+    (typeof input.filePath === 'string' ? input.filePath : undefined)
     ?? (typeof filePathValue === 'string' ? filePathValue : undefined)
     ?? (typeof pathValue === 'string' ? pathValue : undefined)
     ?? (typeof targetFileValue === 'string' ? targetFileValue : undefined)
     ?? (typeof targetFileValue2 === 'string' ? targetFileValue2 : undefined)
     ?? (typeof notebookPathValue === 'string' ? notebookPathValue : undefined)
-    ?? null
+    ?? readPathInProject(input)
   );
 }
 
@@ -239,58 +224,65 @@ interface FileToolInput {
   agentId: string;
 }
 
-function collectLedgerOpsFromToolUse(params: FileToolInput, out: LedgerOp[]): void {
-  const { sourceId, toolUseId, toolName, rawName, input, result, agentId } = params;
-  const isFileModify = isToolName(toolName, FILE_MODIFY_TOOL_NAMES);
-  // Shell/exec blocks are collected too: Codex wraps apply_patch in them.
-  if (!isFileModify && !isToolName(toolName, SHELL_PATCH_TOOL_NAMES)) return;
-  if (!isFileModify) {
-    if (!isSuccessfulResult(result)) return;
-    for (const patch of readEmbeddedPatches(input)) {
-      for (const file of readPatchFiles({ patch })) {
-        out.push(...collectPatchLedger(file, { sourceId, toolUseId, agentId }));
-      }
-    }
-    return;
-  }
-  if (isToolName(toolName, PATCH_TOOL_NAMES)) {
-    const outcome = readPatchOutcome(input, result);
-    if (!outcome.isCompleted || outcome.isError || outcome.isUnknown) return;
-    for (const file of readPatchFiles(input)) {
+function collectShellPatches(params: FileToolInput, out: LedgerOp[]): void {
+  const { sourceId, toolUseId, agentId, input, result } = params;
+  if (!isSuccessfulResult(result)) return;
+  for (const patch of readEmbeddedPatches(input)) {
+    for (const file of readPatchFiles({ patch })) {
       out.push(...collectPatchLedger(file, { sourceId, toolUseId, agentId }));
     }
-    return;
   }
-  if (!isSuccessfulResult(result)) return;
+}
 
-  const normalized = normalizeToolInput(rawName ?? toolName, unwrapToolArguments(input)) as Record<string, unknown>;
+/**
+ * Undo of an "add" deletes the file, so only a create that refuses an existing
+ * path may claim one; an overwrite names none of the content it replaced.
+ */
+function collectCreatedFile(params: FileToolInput, input: Record<string, unknown>, out: LedgerOp[]): void {
+  const { sourceId, toolUseId, agentId } = params;
+  const filePath = extractFilePath(input);
+  if (!filePath) return;
+  const isNewFile = input.overwrite === undefined || input.overwrite === false;
+  const content = typeof input.text === 'string' ? input.text
+    : typeof input.content === 'string' ? input.content : '';
+  out.push({
+    sourceId,
+    toolUseId,
+    agentId,
+    filePath,
+    toolName: 'write',
+    oldString: '',
+    newString: content,
+    fileChangeKind: isNewFile ? 'add' : 'update',
+    ...(isNewFile ? {} : { oldStringKnown: false }),
+  });
+}
+
+function collectPatchOps(params: FileToolInput, input: Record<string, unknown>, out: LedgerOp[]): void {
+  const { sourceId, toolUseId, agentId, result } = params;
+  const outcome = readPatchOutcome(input, result);
+  if (!outcome.isCompleted || outcome.isError || outcome.isUnknown) return;
+  for (const file of readPatchFiles(input)) {
+    out.push(...collectPatchLedger(patchFileInProject(file, input.projectPath), { sourceId, toolUseId, agentId }));
+  }
+}
+
+function collectEditOps(
+  params: FileToolInput,
+  input: Record<string, unknown>,
+  keepEmptyWrite: boolean,
+  out: LedgerOp[],
+): void {
+  const { sourceId, toolUseId, toolName, rawName, agentId, result } = params;
+  const normalized = normalizeToolInput(rawName ?? toolName, input) as Record<string, unknown>;
   const defaultPath = extractFilePath(normalized);
   const pairs = extractEditPairs(normalized);
   const lineInfo = getToolLineInfo(normalized, undefined, result);
-  const isCreateFile = isToolName(toolName, MCP_FILE_MODIFY_TOOL_NAMES)
-    && normalizeToolName(toolName) === 'create_new_file';
 
   for (const pair of pairs) {
     const filePath = pair.filePath || defaultPath;
     if (!filePath) continue;
-    if (pair.oldString === '' && pair.newString === '') {
-      // An intentionally empty new file still belongs in the Edits list.
-      if (isCreateFile) {
-        out.push({
-          sourceId,
-          toolUseId,
-          filePath,
-          toolName,
-          oldString: '',
-          newString: '',
-          agentId,
-          fileChangeKind: 'add',
-          lineStart: lineInfo.start,
-          lineEnd: lineInfo.end,
-        });
-      }
-      continue;
-    }
+    if (pair.oldString === '' && pair.newString === '' && !keepEmptyWrite) continue;
 
     out.push({
       sourceId,
@@ -301,10 +293,100 @@ function collectLedgerOpsFromToolUse(params: FileToolInput, out: LedgerOp[]): vo
       newString: pair.newString,
       replaceAll: pair.replaceAll,
       agentId,
-      ...(isCreateFile ? { fileChangeKind: 'add' as const } : {}),
       lineStart: lineInfo.start,
       lineEnd: lineInfo.end,
     });
+  }
+}
+
+/**
+ * An MCP edit is only reversible when the call fully states its effect; every
+ * other one stays listed but makes undo refuse. The kind keeps Undo and diff
+ * Reject on the same validated plan, and replaceAll stays unset because
+ * reversing it would also rewrite matching text that was already in the file.
+ */
+function toMcpEditOp(op: LedgerOp, input: Record<string, unknown>): LedgerOp {
+  const statesItsEffect = normalizeToolName(op.toolName) === 'replace_text_in_file'
+    && input.caseSensitive !== false && op.oldString !== '';
+  return {
+    ...op,
+    replaceAll: undefined,
+    fileChangeKind: 'update',
+    ...(statesItsEffect ? {} : { oldStringKnown: false }),
+  };
+}
+
+/** MCP paths start at the project root, while undo resolves relative ones against the session directory. */
+function refuseRelativeMcpUndo(op: LedgerOp): LedgerOp {
+  const pathsAreAbsolute = isAbsolutePath(op.filePath) && (!op.moveFrom || isAbsolutePath(op.moveFrom));
+  return pathsAreAbsolute ? op : { ...op, oldStringKnown: false };
+}
+
+function collectMcpOps(params: FileToolInput, out: LedgerOp[]): void {
+  const { toolName, result } = params;
+  const input = unwrapMcpArguments(params.input);
+  if (input.dryRun === true) return;
+  const ops: LedgerOp[] = [];
+  if (isToolName(toolName, PATCH_TOOL_NAMES)) {
+    collectPatchOps(params, input, ops);
+  } else if (isSuccessfulResult(result)) {
+    if (normalizeToolName(toolName) === 'create_new_file') {
+      collectCreatedFile(params, input, ops);
+    } else {
+      const edits: LedgerOp[] = [];
+      collectEditOps(params, input, isWriteTool(toolName), edits);
+      ops.push(...edits.map(op => toMcpEditOp(op, input)));
+    }
+  }
+  out.push(...ops.map(refuseRelativeMcpUndo));
+}
+
+/** Another MCP call in the session may name the project root a relative call omitted. */
+function findProjectPathHint(inputs: FileToolInput[]): string | null {
+  for (const input of inputs) {
+    if (!isMcpToolCall(input.rawName ?? input.toolName, input.input)) continue;
+    const unwrapped = unwrapMcpArguments(input.input);
+    const candidate = unwrapped.projectPath;
+    if (typeof candidate === 'string' && candidate.trim() && isAbsolutePath(candidate.trim())) {
+      return candidate.trim();
+    }
+  }
+  return null;
+}
+
+/**
+ * Keep one row per file when the same MCP file is addressed once with a project
+ * root and once without it: resolve the relative spellings against the root
+ * another call named.
+ */
+function collectLedgerOps(inputs: FileToolInput[]): LedgerOp[] {
+  const ops: LedgerOp[] = [];
+  for (const input of inputs) collectLedgerOpsFromToolUse(input, ops);
+  const root = findProjectPathHint(inputs);
+  if (!root) return ops;
+  return ops.map((op) => {
+    if (isAbsolutePath(op.filePath)) return op;
+    const filePath = readPathInProject({ pathInProject: op.filePath, projectPath: root }) ?? op.filePath;
+    const moveFrom = op.moveFrom && !isAbsolutePath(op.moveFrom)
+      ? readPathInProject({ pathInProject: op.moveFrom, projectPath: root }) ?? op.moveFrom : op.moveFrom;
+    return { ...op, filePath, ...(moveFrom ? { moveFrom } : {}) };
+  });
+}
+
+function collectLedgerOpsFromToolUse(params: FileToolInput, out: LedgerOp[]): void {
+  const { toolName, rawName, input } = params;
+  const isFileModify = isToolName(toolName, FILE_MODIFY_TOOL_NAMES);
+  // Shell/exec blocks are collected too: Codex wraps apply_patch in them.
+  if (!isFileModify) {
+    if (isToolName(toolName, SHELL_PATCH_TOOL_NAMES)) collectShellPatches(params, out);
+    return;
+  }
+  if (isMcpToolCall(rawName ?? toolName, input)) {
+    collectMcpOps(params, out);
+  } else if (isToolName(toolName, PATCH_TOOL_NAMES)) {
+    collectPatchOps(params, input, out);
+  } else if (isSuccessfulResult(params.result)) {
+    collectEditOps(params, input, false, out);
   }
 }
 
@@ -543,8 +625,7 @@ export function useFileChanges({
   }, [messages, getContentBlocks, findToolResult, startFromIndex, subagentHistories, cache]);
 
   const ops = useMemo(() => {
-    const collected: LedgerOp[] = [];
-    for (const input of inputs) collectLedgerOpsFromToolUse(input, collected);
+    const collected = collectLedgerOps(inputs);
     const ignored = new Set(ignoredLedgerKeys);
     const next = ignored.size ? collected.filter(op => !ignored.has(JSON.stringify([op.sourceId, op.toolUseId, op.filePath]))) : collected;
     if (!sameLedgerOps(cache.ops, next)) cache.ops = next;

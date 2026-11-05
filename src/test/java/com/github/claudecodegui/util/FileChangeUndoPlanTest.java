@@ -84,6 +84,20 @@ public class FileChangeUndoPlanTest {
         assertThrows(IllegalArgumentException.class, () -> FileChangeUndoPlan.rebuild("file", "different\n", ops(legacy)));
     }
 
+    /** A later add supersedes an earlier one, whose content no longer has to match. */
+    @Test
+    public void unwindsSupersededAdds() {
+        JsonArray ops = ops(change("add", "", "one\n"), change("add", "", "one\ntwo\n"));
+        assertNull(FileChangeUndoPlan.rebuild("file", "one\ntwo\n", ops).content());
+    }
+
+    /** Appending to a newly created file returns to "the file did not exist". */
+    @Test
+    public void unwindsAnEditAfterCreation() {
+        JsonObject append = update("@@ -1 +1,2 @@\n one\n+two", "one", "one\ntwo");
+        assertNull(FileChangeUndoPlan.rebuild("file", "one\ntwo\n", ops(change("add", "", "one\n"), append)).content());
+    }
+
     /** A patch-less replacement refuses to guess between duplicate occurrences. */
     @Test
     public void refusesAmbiguousLegacyReplacement() {

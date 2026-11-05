@@ -43,6 +43,18 @@ public class EditableDiffHandlerTest {
         this.assertNativeDecisionKeepsItsDirectory(false);
     }
 
+    /** An unreconstructable plan still shows the recorded snippets in order. */
+    @Test
+    public void joinsRecordedSnippetsForTheReadOnlyDiff() {
+        JsonArray ops = new JsonArray();
+        JsonObject operation = new JsonObject();
+        operation.addProperty("oldString", "before");
+        operation.addProperty("newString", "after");
+        ops.add(operation);
+        assertEquals("before", EditableDiffHandler.joinRecordedText(ops, "oldString"));
+        assertEquals("after", EditableDiffHandler.joinRecordedText(ops, "newString"));
+    }
+
     /** A late rejection belongs to the reviewed chat rather than the chat now visible in its window. */
     @Test
     public void keepsTheReviewedChatWithItsUndoSubmission() throws Exception {
