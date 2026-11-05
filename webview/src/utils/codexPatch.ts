@@ -48,6 +48,42 @@ function readDiff(lines: string[], unified: boolean): DiffResult {
   return diff;
 }
 
+/** Decode patch text embedded in a shell/exec script (JSON-escaped or literal newlines). */
+function decodePatchBody(body: string): string {
+  if (!body.includes('\\n')) return body;
+  return body
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"');
+}
+
+/**
+ * Extract apply_patch bodies from shell/exec input. Codex hides patches in
+ * `command`, `code`, `patch` or `input` rather than exposing apply_patch as
+ * its own tool, so the ledger must read the wrapped script text.
+ */
+export function readEmbeddedPatches(input?: ToolInput): string[] {
+  if (!input) return [];
+  for (const field of ['patch', 'input', 'code', 'command', 'cmd']) {
+    const candidate = input[field];
+    if (typeof candidate !== 'string') continue;
+    const patches: string[] = [];
+    let from = 0;
+    while (true) {
+      const begin = candidate.indexOf('*** Begin Patch', from);
+      if (begin < 0) break;
+      const end = candidate.indexOf('*** End Patch', begin);
+      if (end < 0) break;
+      const next = end + '*** End Patch'.length;
+      patches.push(decodePatchBody(candidate.slice(begin, next)));
+      from = next;
+    }
+    if (patches.length > 0) return patches;
+  }
+  return [];
+}
+
 /** Display supplied hunks directly: they cannot reconstruct a complete file. */
 export function readPatchFiles(input: ToolInput | undefined): PatchFile[] {
   if (!input) return [];

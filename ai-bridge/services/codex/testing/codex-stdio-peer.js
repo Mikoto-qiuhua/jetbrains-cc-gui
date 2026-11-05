@@ -264,6 +264,18 @@ export const SCENARIOS = {
       })) } });
     },
   },
+  /** Starts a file edit but never sends the trailing item/completed marker. */
+  'file-change-started-only': {
+    async onTurnStart(_params, ctx) {
+      ctx.reply(ctx.currentId, { turn: { id: TURN_ID } });
+      ctx.notify({ method: 'turn/started', params: { threadId: THREAD_ID,
+        turn: { id: TURN_ID, status: 'inProgress' } } });
+      ctx.notify({ method: 'item/started', params: { threadId: THREAD_ID, turnId: TURN_ID,
+        item: { id: 'started-edit', type: 'fileChange', status: 'inProgress',
+          changes: [{ path: 'src/started.ts', kind: 'update', diff: '@@ -1 +1 @@\n-before\n+after' }] } } });
+      ctx.notify(turnCompleted(TURN_ID));
+    },
+  },
   'image-view': {
     async onTurnStart(_params, ctx) {
       ctx.reply(ctx.currentId, makeThreadStartResponse());

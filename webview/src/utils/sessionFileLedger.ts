@@ -349,6 +349,9 @@ export function buildSessionFileLedger(ops: LedgerOp[]): SessionFileLedgerEntry[
     }))];
     const multiAgent = agentIds.length >= 2;
     const status = determineStatus(fileOps, reconstructed.fullyApplied ? baseline : fileOps[0]?.oldString ?? '');
+    // A file edited and then restored to its session baseline has no reviewable
+    // diff. Added or deleted files stay visible even when their body is empty.
+    if (status === 'M' && reconstructed.fullyApplied && !blankLineOnly && baseline === current) return;
     const firstLine = fileOps.find((o) => typeof o.lineStart === 'number');
 
     entries.push({

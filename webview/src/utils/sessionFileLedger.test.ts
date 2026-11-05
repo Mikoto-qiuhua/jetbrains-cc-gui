@@ -105,15 +105,22 @@ describe('buildSessionFileLedger', () => {
   it('uses net stats for sequential edits (not sum of ops)', () => {
     const ops: LedgerOp[] = [
       op({ filePath: '/a.ts', oldString: 'hello', newString: 'hello world' }),
-      // reverse almost: go back toward original
-      op({ filePath: '/a.ts', oldString: 'hello world', newString: 'hello' }),
+      op({ filePath: '/a.ts', oldString: 'hello world', newString: 'hello brave world' }),
     ];
     const entries = buildSessionFileLedger(ops);
     expect(entries).toHaveLength(1);
-    // Net zero content change
-    expect(entries[0].additions).toBe(0);
-    expect(entries[0].deletions).toBe(0);
+    // Net hello → hello brave world, not the +2/-2 op sum.
+    expect(entries[0].additions).toBe(1);
+    expect(entries[0].deletions).toBe(1);
     expect(entries[0].operations).toHaveLength(2);
+  });
+
+  it('hides a file restored to its session baseline', () => {
+    const ops: LedgerOp[] = [
+      op({ filePath: '/a.ts', oldString: 'hello', newString: 'hello world' }),
+      op({ filePath: '/a.ts', oldString: 'hello world', newString: 'hello' }),
+    ];
+    expect(buildSessionFileLedger(ops)).toEqual([]);
   });
 
   it('sums per-op stats when MultiEdit regions do not chain', () => {

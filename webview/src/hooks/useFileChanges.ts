@@ -3,13 +3,15 @@ import type { ClaudeMessage, ClaudeContentBlock, ToolResultBlock } from '../type
 import type { FileChangeSummary } from '../types/fileChanges';
 import type { SubagentHistoryResponse } from '../types/subagent';
 import {
+  BASH_TOOL_NAMES,
   FILE_MODIFY_TOOL_NAMES,
+  MCP_FILE_MODIFY_TOOL_NAMES,
   AGENT_TOOL_NAMES,
   isToolName,
   normalizeToolName,
 } from '../utils/toolConstants';
 import { normalizeToolInput } from '../utils/toolInputNormalization';
-import { readPatchFiles, readPatchOutcome } from '../utils/codexPatch';
+import { readEmbeddedPatches, readPatchFiles, readPatchOutcome } from '../utils/codexPatch';
 import { collectPatchLedger } from '../utils/patchLedger';
 import { PATCH_TOOL_NAMES } from '../utils/toolConstants';
 import { getToolLineInfo } from '../utils/toolPresentation';
@@ -78,7 +80,30 @@ export function computeDiffStats(
   return result;
 }
 
+/** Shell/exec blocks also carry apply_patch scripts; they are not file tools themselves. */
+const SHELL_PATCH_TOOL_NAMES = new Set([...BASH_TOOL_NAMES, 'exec']);
+
+const ABSOLUTE_PATH_PATTERN = /^(?:\/|[A-Za-z]:[\\/]|\\\\)/;
+
+/** MCP tools wrap real arguments one level down; keep the outer fields for server metadata. */
+function unwrapToolArguments(input: Record<string, unknown>): Record<string, unknown> {
+  const args = input.arguments;
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return input;
+  return { ...input, ...(args as Record<string, unknown>) };
+}
+
+/** JetBrains MCP addresses files relative to the project root. */
+function resolvePathInProject(input: Record<string, unknown>): string | null {
+  const pathInProject = input.pathInProject;
+  if (typeof pathInProject !== 'string' || pathInProject.trim() === '') return null;
+  const projectPath = typeof input.projectPath === 'string' ? input.projectPath.trim() : '';
+  if (!projectPath || ABSOLUTE_PATH_PATTERN.test(pathInProject)) return pathInProject;
+  const separator = projectPath.includes('\\') ? '\\' : '/';
+  return `${projectPath.replace(/[\\/]+$/, '')}${separator}${pathInProject.replace(/^[\\/]+/, '')}`;
+}
+
 function extractFilePath(input: Record<string, unknown>): string | null {
+  const pathInProjectValue = resolvePathInProject(input);
   const pathValue = input.path;
   const filePathValue = input.file_path;
   const targetFileValue = input.target_file;
@@ -86,7 +111,8 @@ function extractFilePath(input: Record<string, unknown>): string | null {
   const notebookPathValue = input.notebook_path;
 
   return (
-    (typeof input.filePath === 'string' ? input.filePath : undefined)
+    pathInProjectValue
+    ?? (typeof input.filePath === 'string' ? input.filePath : undefined)
     ?? (typeof filePathValue === 'string' ? filePathValue : undefined)
     ?? (typeof pathValue === 'string' ? pathValue : undefined)
     ?? (typeof targetFileValue === 'string' ? targetFileValue : undefined)
@@ -114,6 +140,8 @@ function pairFromRecord(record: Record<string, unknown>): StringPair {
     ?? (typeof record.newString === 'string' ? record.newString : undefined)
     ?? (typeof record.newText === 'string' ? record.newText : undefined)
     ?? (typeof record.content === 'string' ? record.content : undefined)
+    // JetBrains MCP create_new_file supplies the body as `text`.
+    ?? (typeof record.text === 'string' ? record.text : undefined)
     ?? '';
   const replaceAll =
     typeof record.replace_all === 'boolean'
@@ -213,7 +241,18 @@ interface FileToolInput {
 
 function collectLedgerOpsFromToolUse(params: FileToolInput, out: LedgerOp[]): void {
   const { sourceId, toolUseId, toolName, rawName, input, result, agentId } = params;
-  if (!isToolName(toolName, FILE_MODIFY_TOOL_NAMES)) return;
+  const isFileModify = isToolName(toolName, FILE_MODIFY_TOOL_NAMES);
+  // Shell/exec blocks are collected too: Codex wraps apply_patch in them.
+  if (!isFileModify && !isToolName(toolName, SHELL_PATCH_TOOL_NAMES)) return;
+  if (!isFileModify) {
+    if (!isSuccessfulResult(result)) return;
+    for (const patch of readEmbeddedPatches(input)) {
+      for (const file of readPatchFiles({ patch })) {
+        out.push(...collectPatchLedger(file, { sourceId, toolUseId, agentId }));
+      }
+    }
+    return;
+  }
   if (isToolName(toolName, PATCH_TOOL_NAMES)) {
     const outcome = readPatchOutcome(input, result);
     if (!outcome.isCompleted || outcome.isError || outcome.isUnknown) return;
@@ -224,15 +263,34 @@ function collectLedgerOpsFromToolUse(params: FileToolInput, out: LedgerOp[]): vo
   }
   if (!isSuccessfulResult(result)) return;
 
-  const normalized = normalizeToolInput(rawName ?? toolName, input) as Record<string, unknown>;
+  const normalized = normalizeToolInput(rawName ?? toolName, unwrapToolArguments(input)) as Record<string, unknown>;
   const defaultPath = extractFilePath(normalized);
   const pairs = extractEditPairs(normalized);
   const lineInfo = getToolLineInfo(normalized, undefined, result);
+  const isCreateFile = isToolName(toolName, MCP_FILE_MODIFY_TOOL_NAMES)
+    && normalizeToolName(toolName) === 'create_new_file';
 
   for (const pair of pairs) {
     const filePath = pair.filePath || defaultPath;
     if (!filePath) continue;
-    if (pair.oldString === '' && pair.newString === '') continue;
+    if (pair.oldString === '' && pair.newString === '') {
+      // An intentionally empty new file still belongs in the Edits list.
+      if (isCreateFile) {
+        out.push({
+          sourceId,
+          toolUseId,
+          filePath,
+          toolName,
+          oldString: '',
+          newString: '',
+          agentId,
+          fileChangeKind: 'add',
+          lineStart: lineInfo.start,
+          lineEnd: lineInfo.end,
+        });
+      }
+      continue;
+    }
 
     out.push({
       sourceId,
@@ -243,6 +301,7 @@ function collectLedgerOpsFromToolUse(params: FileToolInput, out: LedgerOp[]): vo
       newString: pair.newString,
       replaceAll: pair.replaceAll,
       agentId,
+      ...(isCreateFile ? { fileChangeKind: 'add' as const } : {}),
       lineStart: lineInfo.start,
       lineEnd: lineInfo.end,
     });
@@ -319,7 +378,8 @@ function collectFromSubagentHistories(
 
         const name = typeof item.name === 'string' ? item.name : '';
         const toolName = normalizeToolName(name);
-        if (!isToolName(toolName, FILE_MODIFY_TOOL_NAMES)) continue;
+        if (!isToolName(toolName, FILE_MODIFY_TOOL_NAMES)
+          && !isToolName(toolName, SHELL_PATCH_TOOL_NAMES)) continue;
 
         const toolUseId = typeof item.id === 'string' ? item.id : undefined;
         if (!toolUseId) continue;
@@ -431,7 +491,8 @@ export function useFileChanges({
           agentKeysAfterBase.add(block.id);
         }
 
-        if (!isToolName(toolName, FILE_MODIFY_TOOL_NAMES)) return;
+        if (!isToolName(toolName, FILE_MODIFY_TOOL_NAMES)
+          && !isToolName(toolName, SHELL_PATCH_TOOL_NAMES)) return;
 
         const rawInput = block.input as Record<string, unknown> | undefined;
         if (!rawInput) return;

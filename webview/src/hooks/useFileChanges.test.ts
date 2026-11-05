@@ -291,10 +291,10 @@ describe('file ledger work budget', () => {
     expect(result.current[0].lineStart).toBe(10);
     expect(reads).not.toHaveBeenCalled();
     expect(writes).not.toHaveBeenCalled();
-    rerender(snapshot([...messages, edit('next', '/budget.ts', 'after', 'before'), userWithResults([{ toolUseId: 'next' }])]));
+    rerender(snapshot([...messages, edit('next', '/budget.ts', 'after', 'final'), userWithResults([{ toolUseId: 'next' }])]));
     expect(result.current[0].operations).toHaveLength(2);
-    expect(result.current[0].additions).toBe(0);
-    expect(result.current[0].deletions).toBe(0);
+    expect(result.current[0].additions).toBe(1);
+    expect(result.current[0].deletions).toBe(1);
     expect(JSON.parse([...store.values()][0])['/budget.ts'][0].updatedAt).toBe(2000);
   });
 
@@ -324,10 +324,11 @@ describe('file ledger work budget', () => {
     ]) });
     expect(JSON.parse([...store.values()][0])['/budget.ts'][0].updatedAt).toBe(1000);
     rerender({ ...props, subagentHistories: history([
-      ...subMessages, edit('next', '/budget.ts', 'after', 'before'), userWithResults([{ toolUseId: 'next' }]),
+      ...subMessages, edit('next', '/budget.ts', 'after', 'final'), userWithResults([{ toolUseId: 'next' }]),
     ]) });
     expect(result.current[0].operations).toHaveLength(2);
-    expect(result.current[0].additions).toBe(0);
+    expect(result.current[0].additions).toBe(1);
+    expect(result.current[0].deletions).toBe(1);
     expect(result.current[0].agentIds).toEqual(['sub']);
   });
 });
@@ -656,6 +657,254 @@ describe('useFileChanges', () => {
     expect(result.current.map((f) => f.filePath)).toContain('/proj/from-agent.ts');
   });
 
+  it('adds edits Codex performs through an exec script', () => {
+    const messages: ClaudeMessage[] = [
+      assistantWithTools([{
+        id: 'exec-1',
+        name: 'functions.exec',
+        input: { patch: '*** Begin Patch\n*** Update File: /proj/exec.ts\n@@\n-before\n+after\n*** End Patch' },
+      }]),
+      userWithResults([{ toolUseId: 'exec-1' }]),
+    ];
+
+    const { result } = renderHook(() =>
+      useFileChanges({
+        messages,
+        getContentBlocks,
+        findToolResult: makeFindToolResult(messages),
+      }),
+    );
+
+    expect(result.current).toHaveLength(1);
+    expect(result.current[0]).toMatchObject({
+      filePath: '/proj/exec.ts', status: 'M', additions: 1, deletions: 1,
+    });
+    expect(result.current[0].operations[0]).toMatchObject({ oldString: 'before', newString: 'after' });
+  });
+
+  it('adds edits from a functions.exec_command apply_patch heredoc', () => {
+    const messages: ClaudeMessage[] = [
+      assistantWithTools([{
+        id: 'exec-heredoc',
+        name: 'functions.exec_command',
+        input: {
+          command: "apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: /proj/created.ts\n+created line\n*** End Patch\nEOF",
+        },
+      }]),
+      userWithResults([{ toolUseId: 'exec-heredoc' }]),
+    ];
+
+    const { result } = renderHook(() =>
+      useFileChanges({
+        messages,
+        getContentBlocks,
+        findToolResult: makeFindToolResult(messages),
+      }),
+    );
+
+    expect(result.current).toHaveLength(1);
+    expect(result.current[0]).toMatchObject({
+      filePath: '/proj/created.ts', status: 'A', additions: 1, deletions: 0,
+    });
+  });
+
+  it('adds JetBrains MCP replace_text_in_file with project-relative paths', () => {
+    const messages: ClaudeMessage[] = [
+      assistantWithTools([{
+        id: 'jb-replace',
+        name: 'mcp__jetbrains__replace_text_in_file',
+        input: {
+          server: 'jetbrains',
+          arguments: {
+            pathInProject: 'src/app.ts',
+            projectPath: '/proj',
+            oldText: 'before',
+            newText: 'after',
+            replaceAll: true,
+          },
+        },
+      }]),
+      userWithResults([{ toolUseId: 'jb-replace' }]),
+    ];
+
+    const { result } = renderHook(() =>
+      useFileChanges({
+        messages,
+        getContentBlocks,
+        findToolResult: makeFindToolResult(messages),
+      }),
+    );
+
+    expect(result.current).toHaveLength(1);
+    expect(result.current[0]).toMatchObject({
+      filePath: '/proj/src/app.ts', status: 'M', additions: 1, deletions: 1,
+    });
+    expect(result.current[0].operations[0]).toMatchObject({
+      oldString: 'before', newString: 'after', replaceAll: true,
+    });
+  });
+
+  it('adds JetBrains MCP create_new_file with its text body', () => {
+    const messages: ClaudeMessage[] = [
+      assistantWithTools([{
+        id: 'jb-create',
+        name: 'mcp__jetbrains__create_new_file',
+        input: {
+          server: 'jetbrains',
+          arguments: { pathInProject: 'docs/mcp-test.md', projectPath: '/proj', text: '# MCP Test\nhello' },
+        },
+      }]),
+      userWithResults([{ toolUseId: 'jb-create' }]),
+    ];
+
+    const { result } = renderHook(() =>
+      useFileChanges({
+        messages,
+        getContentBlocks,
+        findToolResult: makeFindToolResult(messages),
+      }),
+    );
+
+    expect(result.current).toHaveLength(1);
+    expect(result.current[0]).toMatchObject({ status: 'A', additions: 2, deletions: 0 });
+    expect(result.current[0].operations[0].fileChangeKind).toBe('add');
+  });
+
+  it('keeps an empty JetBrains MCP create_new_file in the ledger', () => {
+    const messages: ClaudeMessage[] = [
+      assistantWithTools([{
+        id: 'jb-create-empty',
+        name: 'mcp__jetbrains__create_new_file',
+        input: { server: 'jetbrains', arguments: { pathInProject: 'docs/empty.md', projectPath: '/proj', text: '' } },
+      }]),
+      userWithResults([{ toolUseId: 'jb-create-empty' }]),
+    ];
+
+    const { result } = renderHook(() =>
+      useFileChanges({
+        messages,
+        getContentBlocks,
+        findToolResult: makeFindToolResult(messages),
+      }),
+    );
+
+    expect(result.current).toHaveLength(1);
+    expect(result.current[0]).toMatchObject({ filePath: '/proj/docs/empty.md', status: 'A' });
+  });
+
+  it('joins Windows project paths for JetBrains MCP files', () => {
+    const messages: ClaudeMessage[] = [
+      assistantWithTools([{
+        id: 'jb-win',
+        name: 'replace_text_in_file',
+        input: { pathInProject: 'src\\win.ts', projectPath: 'C:\\proj', oldText: 'a', newText: 'b' },
+      }]),
+      userWithResults([{ toolUseId: 'jb-win' }]),
+    ];
+
+    const { result } = renderHook(() =>
+      useFileChanges({
+        messages,
+        getContentBlocks,
+        findToolResult: makeFindToolResult(messages),
+      }),
+    );
+
+    expect(result.current[0].filePath).toBe('C:\\proj\\src\\win.ts');
+  });
+
+  it('unwraps MCP arguments for generic write_file tools', () => {
+    const messages: ClaudeMessage[] = [
+      assistantWithTools([{
+        id: 'generic-mcp',
+        name: 'mcp__filesystem__write_file',
+        input: { server: 'filesystem', arguments: { path: '/proj/generic.ts', content: 'new line' } },
+      }]),
+      userWithResults([{ toolUseId: 'generic-mcp' }]),
+    ];
+
+    const { result } = renderHook(() =>
+      useFileChanges({
+        messages,
+        getContentBlocks,
+        findToolResult: makeFindToolResult(messages),
+      }),
+    );
+
+    expect(result.current[0]).toMatchObject({ filePath: '/proj/generic.ts', status: 'A', additions: 1 });
+  });
+
+  it('ignores failed JetBrains MCP file operations', () => {
+    const messages: ClaudeMessage[] = [
+      assistantWithTools([{
+        id: 'jb-failed',
+        name: 'replace_text_in_file',
+        input: { pathInProject: 'src/failed.ts', projectPath: '/proj', oldText: 'a', newText: 'b' },
+      }]),
+      userWithResults([{ toolUseId: 'jb-failed', isError: true }]),
+    ];
+
+    const { result } = renderHook(() =>
+      useFileChanges({
+        messages,
+        getContentBlocks,
+        findToolResult: makeFindToolResult(messages),
+      }),
+    );
+
+    expect(result.current).toEqual([]);
+  });
+
+  it('hides a file created and then deleted within the session', () => {
+    const addPatch = '*** Begin Patch\n*** Add File: /proj/temp.ts\n+temporary\n*** End Patch';
+    const deletePatch = '*** Begin Patch\n*** Delete File: /proj/temp.ts\n*** End Patch';
+    const messages: ClaudeMessage[] = [
+      assistantWithTools([{ id: 'create-temp', name: 'functions.exec', input: { patch: addPatch } }]),
+      userWithResults([{ toolUseId: 'create-temp' }]),
+      assistantWithTools([{ id: 'delete-temp', name: 'functions.exec', input: { patch: deletePatch } }]),
+      userWithResults([{ toolUseId: 'delete-temp' }]),
+    ];
+
+    const { result } = renderHook(() =>
+      useFileChanges({
+        messages,
+        getContentBlocks,
+        findToolResult: makeFindToolResult(messages),
+      }),
+    );
+
+    expect(result.current).toEqual([]);
+  });
+
+  it('accumulates same-file operations across turns in one session', () => {
+    const messages: ClaudeMessage[] = [
+      assistantWithTools([{
+        id: 'turn-1', name: 'Edit', input: { file_path: '/proj/accumulate.ts', old_string: 'a', new_string: 'b' },
+      }]),
+      userWithResults([{ toolUseId: 'turn-1' }]),
+      { type: 'user', content: 'next turn' } as ClaudeMessage,
+      assistantWithTools([{
+        id: 'turn-2', name: 'Edit', input: { file_path: '/proj/accumulate.ts', old_string: 'b', new_string: 'c' },
+      }]),
+      userWithResults([{ toolUseId: 'turn-2' }]),
+    ];
+
+    const { result } = renderHook(() =>
+      useFileChanges({
+        messages,
+        getContentBlocks,
+        findToolResult: makeFindToolResult(messages),
+        currentSessionId: 'session-accumulate',
+      }),
+    );
+
+    expect(result.current).toHaveLength(1);
+    expect(result.current[0]).toMatchObject({
+      filePath: '/proj/accumulate.ts', status: 'M', additions: 1, deletions: 1,
+    });
+    expect(result.current[0].operations).toHaveLength(2);
+  });
+
   it('skips failed tool results', () => {
     const messages: ClaudeMessage[] = [
       assistantWithTools([
@@ -688,7 +937,7 @@ describe('useFileChanges', () => {
     expect(result.current[0].filePath).toBe('/proj/ok.ts');
   });
 
-  it('uses net session stats for sequential edits on same file (not op sum)', () => {
+  it('hides a file reverted to its session baseline', () => {
     const messages: ClaudeMessage[] = [
       assistantWithTools([
         {
@@ -713,11 +962,8 @@ describe('useFileChanges', () => {
       }),
     );
 
-    expect(result.current).toHaveLength(1);
-    // Reverted to original content → net 0 (sum would be +2 -2)
-    expect(result.current[0].additions).toBe(0);
-    expect(result.current[0].deletions).toBe(0);
-    expect(result.current[0].operations).toHaveLength(2);
+    // Reverted to the content present before the session started.
+    expect(result.current).toEqual([]);
   });
 
   it('marks multiAgent when main and subagent both edit the same file', () => {

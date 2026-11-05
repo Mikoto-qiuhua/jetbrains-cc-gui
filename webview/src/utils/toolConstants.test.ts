@@ -51,6 +51,14 @@ describe('FILE_MODIFY_TOOL_NAMES', () => {
   });
 });
 
+describe('MCP file tools', () => {
+  it('recognizes JetBrains file modification tools with or without the MCP prefix', () => {
+    expect(isToolName('create_new_file', FILE_MODIFY_TOOL_NAMES)).toBe(true);
+    expect(isToolName('replace_text_in_file', FILE_MODIFY_TOOL_NAMES)).toBe(true);
+    expect(isToolName('mcp__jetbrains__replace_text_in_file', FILE_MODIFY_TOOL_NAMES)).toBe(true);
+  });
+});
+
 describe('EDIT_TOOL_NAMES', () => {
   it('routes Search Replace to edit tool UI grouping', () => {
     expect(isToolName('Search Replace', EDIT_TOOL_NAMES)).toBe(true);

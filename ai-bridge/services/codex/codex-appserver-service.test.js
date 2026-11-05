@@ -2067,6 +2067,31 @@ test('native plan deltas are replaced by the authoritative item and file changes
   }
 });
 
+test('started-only native file changes settle as completed on a successful turn', async () => {
+  const markers = [];
+  const { service } = makeService({
+    scenario: 'file-change-started-only',
+    serviceOpts: { emitMarker: (_operation, marker) => markers.push(marker) },
+  });
+  try {
+    const result = await service.send({
+      input: [{ type: 'text', text: 'edit a file' }],
+      clientMessageId: 'cm-started-only',
+    });
+    assert.equal(result.outcome, 'completed');
+    const messages = markers
+      .filter((marker) => typeof marker === 'string' && marker.startsWith('[MESSAGE] '))
+      .map((marker) => JSON.parse(marker.slice('[MESSAGE] '.length)));
+    const edits = messages.filter((message) => message.codexItemId === 'started-edit');
+    assert.ok(edits.length >= 2, 'the edit is emitted on start and again when promoted');
+    assert.equal(edits[0].message.content[0].input.status, 'inProgress');
+    assert.equal(edits.at(-1).message.content[0].input.status, 'completed',
+      'a successful turn promotes an unfinished fileChange to completed');
+  } finally {
+    await service.resetRuntime();
+  }
+});
+
 test('file approval carries the same native item multi-file preview to the UI', async () => {
   const { service, events } = makeService({ scenario: 'file-approval-with-item' });
   try {

@@ -51,8 +51,16 @@ export const TRANSIENT_INTERNAL_TOOL_NAMES = new Set([
   'multi_tool_use.parallel',
 ]);
 
+// JetBrains IDEA MCP file tools (2025.2+). normalizeToolName strips the
+// mcp__server__ prefix, so both bare and prefixed names hit this set.
+export const MCP_FILE_MODIFY_TOOL_NAMES = new Set([
+  'create_new_file',
+  'replace_text_in_file',
+]);
+
 // File modification tools (StatusPanel Edits tab / rewind — includes write + MultiEdit)
 export const FILE_MODIFY_TOOL_NAMES = new Set([
+  ...MCP_FILE_MODIFY_TOOL_NAMES,
   'write',
   'write_file',
   'edit',

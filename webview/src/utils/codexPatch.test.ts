@@ -1,5 +1,29 @@
 import { describe, expect, it } from 'vitest';
-import { readPatchFiles } from './codexPatch';
+import { readEmbeddedPatches, readPatchFiles } from './codexPatch';
+
+describe('embedded patches', () => {
+  it('recovers an apply_patch heredoc from an exec command', () => {
+    const patches = readEmbeddedPatches({
+      command: "apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: src/new.ts\n+const value = 1;\n*** End Patch\nEOF",
+    });
+    expect(patches).toHaveLength(1);
+    expect(readPatchFiles({ patch: patches[0] })).toMatchObject([{ path: 'src/new.ts', kind: 'add' }]);
+  });
+
+  it('supports JSON-escaped newlines and multiple patches in one script', () => {
+    const patches = readEmbeddedPatches({
+      code: 'await tools.apply_patch("*** Begin Patch\\n*** Update File: a.ts\\n@@\\n-before\\n+after\\n*** End Patch");'
+        + 'await tools.apply_patch("*** Begin Patch\\n*** Delete File: b.ts\\n*** End Patch");',
+    });
+    expect(patches).toHaveLength(2);
+    expect(readPatchFiles({ patch: patches[0] }).map(file => file.path)).toEqual(['a.ts']);
+    expect(readPatchFiles({ patch: patches[1] }).map(file => file.path)).toEqual(['b.ts']);
+  });
+
+  it('ignores ordinary shell commands', () => {
+    expect(readEmbeddedPatches({ command: 'ls -la && npm test' })).toEqual([]);
+  });
+});
 
 describe('patch display', () => {
   it('accepts the input argument used by function-call apply_patch', () => {

@@ -1016,7 +1016,11 @@ export class CodexAppServerService extends EventEmitter {
           && operation.itemDisplayIdentities?.has(item.id) && item.threadId === operation.threadId
           && (item.turnId === operation.nativeTurnId || item.turnId == null && operation.kind === 'compact')
           && !['completed', 'failed', 'declined', 'interrupted'].includes(item.status)
-          && (outcome !== 'completed' || item.type === 'reasoning')) {
+          // A successful turn proves every started edit landed, even when Codex
+          // omits the trailing item/completed marker; without this promotion the
+          // ledger keeps rejecting the file as inProgress forever.
+          && (outcome !== 'completed' || item.type === 'reasoning'
+            || item.type === 'fileChange' && !item.proposed && item.status !== 'proposed')) {
         const terminal = { ...item, status: outcome === 'cancelled' ? 'interrupted' : outcome };
         this.#rememberItemSnapshot(item.threadId, item.turnId, terminal);
         this.#emitItemMarkers(operation, terminal, { authoritative: true });
