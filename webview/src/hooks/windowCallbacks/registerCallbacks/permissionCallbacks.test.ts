@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useDialogManagement } from '../../useDialogManagement';
 import { registerPermissionCallbacks } from './permissionCallbacks';
 import { sendBridgeEvent } from '../../../utils/bridge';
+import { normalizeQuestions } from '../../../components/AskUserQuestionDialog/answerState';
 
 vi.mock('../../../utils/bridge', () => ({ sendBridgeEvent: vi.fn() }));
 const t = ((key: string) => key) as TFunction;
@@ -167,5 +168,43 @@ describe('Codex command approval suggestions', () => {
       command: 'git status',
       proposedExecpolicyAmendment: ['git', 'status'],
     })).toEqual(['accept', 'acceptForSession', 'decline', ruleDecision]);
+  });
+});
+
+describe('Codex question payload variants', () => {
+  function normalizedQuestions(params: Record<string, unknown>) {
+    const { result } = renderHook(() => useDialogManagement({ t }));
+    act(() => { registerDialogCallbacks(result.current); });
+    act(() => {
+      window.onCodexRuntimeEvent?.(JSON.stringify({
+        kind: 'interactionRequested',
+        channelId: 'C',
+        interactionKey: 'question-key',
+        dialogToken: 'question-token',
+        deliverySequence: 1,
+        payload: { method: 'item/tool/requestUserInput', params },
+      }));
+    });
+    return normalizeQuestions(result.current.currentAskUserQuestionRequest?.questions);
+  }
+
+  it('reads questions nested under request', () => {
+    expect(normalizedQuestions({ request: { questions: [{ id: 'q1', question: 'Pick one' }] } })[0])
+      .toMatchObject({ id: 'q1', question: 'Pick one' });
+  });
+
+  it('converts an id-keyed question map', () => {
+    expect(normalizedQuestions({ questions: { q1: { question: 'Pick one' } } })[0])
+      .toMatchObject({ id: 'q1', question: 'Pick one' });
+  });
+
+  it('treats a plain string question as free text', () => {
+    expect(normalizedQuestions({ questions: 'What is your name?' })[0])
+      .toMatchObject({ question: 'What is your name?' });
+  });
+
+  it('accepts prompt as the question text', () => {
+    expect(normalizedQuestions({ questions: [{ id: 'q2', prompt: 'Pick two' }] })[0])
+      .toMatchObject({ id: 'q2', question: 'Pick two' });
   });
 });

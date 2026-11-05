@@ -3,6 +3,8 @@ package com.github.claudecodegui.session;
 import com.github.claudecodegui.handler.PermissionHandler;
 import com.github.claudecodegui.permission.PermissionRequest;
 import com.github.claudecodegui.util.JsUtils;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.intellij.openapi.application.ApplicationManager;
@@ -441,6 +443,7 @@ public class SessionCallbackAdapter implements ClaudeSession.SessionCallback {
             if (!isCodexUserInputRequest(event) || !remindedUserInputInteractions.add(key)) {
                 return;
             }
+            LOG.info("[CODEX][USER_INPUT] " + describeUserInput(event.getAsJsonObject("payload")));
             permissionHandler.remindUserInputRequest();
         } catch (Exception e) {
             LOG.debug("[CODEX][USER_INPUT_REMINDER] Skipped: " + e.getMessage());
@@ -463,6 +466,37 @@ public class SessionCallbackAdapter implements ClaudeSession.SessionCallback {
         String method = payload.has("method") && !payload.get("method").isJsonNull()
                 ? payload.get("method").getAsString() : "";
         return method.contains("requestUserInput") || method.contains("elicitation");
+    }
+
+    /** Content-free shape summary, so an unsupported native question is diagnosable from idea.log. */
+    private static String describeUserInput(JsonObject payload) {
+        if (payload == null) {
+            return "payload=<missing>";
+        }
+        String method = payload.has("method") && !payload.get("method").isJsonNull()
+                ? payload.get("method").getAsString() : "";
+        JsonObject params = payload.has("params") && payload.get("params").isJsonObject()
+                ? payload.getAsJsonObject("params") : null;
+        if (params == null) {
+            return "method=" + method + " params=<missing>";
+        }
+        StringBuilder summary = new StringBuilder("method=").append(method)
+                .append(" paramsKeys=").append(params.keySet());
+        JsonElement questions = params.get("questions");
+        if (questions == null) {
+            summary.append(" questions=<missing>");
+        } else if (questions.isJsonArray()) {
+            JsonArray array = questions.getAsJsonArray();
+            summary.append(" questions=array(").append(array.size()).append(")");
+            if (array.size() > 0 && array.get(0).isJsonObject()) {
+                summary.append(" firstKeys=").append(array.get(0).getAsJsonObject().keySet());
+            }
+        } else if (questions.isJsonObject()) {
+            summary.append(" questions=object keys=").append(questions.getAsJsonObject().keySet());
+        } else {
+            summary.append(" questions=primitive");
+        }
+        return summary.toString();
     }
 
     @Override

@@ -35,6 +35,49 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 /**
+ * Native question lists are normally an array, but app-server versions in the
+ * wild also send them as a JSON string or an id-keyed map. Coerce all of those
+ * so the dialog never dead-ends on an "unsupported format" screen.
+ */
+function coerceQuestionList(value: unknown): unknown[] {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+    try {
+      return coerceQuestionList(JSON.parse(trimmed));
+    } catch {
+      return [{ question: trimmed }];
+    }
+  }
+  if (Array.isArray(value)) return value;
+  const record = asRecord(value);
+  if (!record) return [];
+  if (Array.isArray(record.questions)) return record.questions;
+  if (typeof record.question === 'string' || typeof record.text === 'string') return [record];
+  return Object.entries(record).flatMap(([key, item]) => {
+    const entry = asRecord(item);
+    if (entry) return [{ id: entry.id ?? key, ...entry }];
+    return typeof item === 'string' ? [{ id: key, question: item }] : [];
+  });
+}
+
+function extractCodexQuestions(params: Record<string, unknown>): unknown[] {
+  const nested = [
+    params.questions,
+    asRecord(params.request)?.questions,
+    asRecord(params.input)?.questions,
+    asRecord(params.form)?.questions,
+  ];
+  for (const candidate of nested) {
+    const coerced = coerceQuestionList(candidate);
+    if (coerced.length > 0) return coerced;
+  }
+  if (typeof params.question === 'string') return [{ question: params.question }];
+  const form = asRecord(params.form);
+  return form ? [form] : [];
+}
+
+/**
  * Build the typed decision suggestions a Codex approval dialog may offer.
  *
  * When the app-server advertises `availableDecisions`, that list is
@@ -276,11 +319,7 @@ export function registerPermissionCallbacks(options: PermissionCallbacks): void 
         return;
       }
       if (method.includes('requestUserInput')) {
-        const questions = Array.isArray(params.questions)
-          ? params.questions
-          : params.form && typeof params.form === 'object'
-            ? [params.form]
-            : [];
+        const questions = extractCodexQuestions(params);
         openAskUserQuestionDialog({
           requestId: event.interactionKey,
           toolName: method,

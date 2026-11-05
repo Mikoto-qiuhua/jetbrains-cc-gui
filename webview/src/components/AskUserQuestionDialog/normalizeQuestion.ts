@@ -13,7 +13,13 @@ function normalizeIntent(raw: any): QuestionIntent | undefined {
 
 export function normalizeQuestion(raw: any): Question | null {
   if (!raw || typeof raw !== 'object') return null;
-  const questionText = typeof raw.question === 'string' ? raw.question : (typeof raw.text === 'string' ? raw.text : '');
+  const questionText = typeof raw.question === 'string'
+    ? raw.question
+    : typeof raw.text === 'string'
+      ? raw.text
+      : typeof raw.prompt === 'string'
+        ? raw.prompt
+        : typeof raw.message === 'string' ? raw.message : '';
   const id = typeof raw.id === 'string' && raw.id ? raw.id : undefined;
   const header = typeof raw.header === 'string' ? raw.header : '';
   const multiSelect = typeof raw.multiSelect === 'boolean' ? raw.multiSelect : false;
@@ -27,7 +33,13 @@ export function normalizeQuestion(raw: any): Question | null {
   const options: QuestionOption[] = rawOptions.flatMap((opt: any): QuestionOption[] => {
     if (typeof opt === 'string') return [{ label: opt, description: '' }];
     if (!opt || typeof opt !== 'object') return [];
-    const label = typeof opt.label === 'string' ? opt.label : (typeof opt.value === 'string' ? opt.value : '');
+    const label = typeof opt.label === 'string'
+      ? opt.label
+      : typeof opt.value === 'string'
+        ? opt.value
+        : typeof opt.title === 'string'
+          ? opt.title
+          : typeof opt.text === 'string' ? opt.text : '';
     const description = typeof opt.description === 'string' ? opt.description : '';
     if (!label) return [];
     return [{ label, description }];
