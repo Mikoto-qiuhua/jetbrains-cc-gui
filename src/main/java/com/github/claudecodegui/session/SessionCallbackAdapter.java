@@ -4,12 +4,15 @@ import com.github.claudecodegui.handler.PermissionHandler;
 import com.github.claudecodegui.permission.PermissionRequest;
 import com.github.claudecodegui.util.JsUtils;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.vfs.VirtualFileManager;
 import com.intellij.util.Alarm;
 
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -51,6 +54,8 @@ public class SessionCallbackAdapter implements ClaudeSession.SessionCallback {
     private final AtomicReference<String> lastSessionId = new AtomicReference<>();
     /** Latest state callback, retained so stream end can capture the post-boundary raw tree. */
     private volatile List<ClaudeSession.Message> latestMessages;
+    /** Codex question interactions already announced, so replays don't re-toast. */
+    private final Set<String> remindedUserInputInteractions = ConcurrentHashMap.newKeySet();
 
     public SessionCallbackAdapter(
             StreamMessageCoalescer streamCoalescer,
@@ -406,7 +411,58 @@ public class SessionCallbackAdapter implements ClaudeSession.SessionCallback {
         if (isInactive() || eventJson == null || eventJson.trim().isEmpty()) {
             return;
         }
+        remindCodexUserInputIfNeeded(eventJson);
         jsTarget.callJavaScript("onCodexRuntimeEvent", JsUtils.escapeJs(eventJson));
+    }
+
+    /**
+     * Codex questions arrive as {@code interactionRequested} (requestUserInput /
+     * elicitation) and are rendered by the webview itself. Claude's AskUserQuestion
+     * also pings the opt-in system toast and sound, so mirror that here; otherwise
+     * Codex questions stay invisible when the IDE window is in the background.
+     */
+    private void remindCodexUserInputIfNeeded(String eventJson) {
+        if (permissionHandler == null) {
+            return;
+        }
+        try {
+            JsonObject event = JsonParser.parseString(eventJson).getAsJsonObject();
+            String key = event.has("interactionKey") && !event.get("interactionKey").isJsonNull()
+                    ? event.get("interactionKey").getAsString() : "";
+            if (key.isEmpty()) {
+                return;
+            }
+            String kind = event.has("kind") && !event.get("kind").isJsonNull()
+                    ? event.get("kind").getAsString() : "";
+            if ("interactionResolved".equals(kind)) {
+                remindedUserInputInteractions.remove(key);
+                return;
+            }
+            if (!isCodexUserInputRequest(event) || !remindedUserInputInteractions.add(key)) {
+                return;
+            }
+            permissionHandler.remindUserInputRequest();
+        } catch (Exception e) {
+            LOG.debug("[CODEX][USER_INPUT_REMINDER] Skipped: " + e.getMessage());
+        }
+    }
+
+    /** True when the event announces an unanswered Codex question interaction. */
+    static boolean isCodexUserInputRequest(JsonObject event) {
+        if (event == null || !event.has("kind") || event.get("kind").isJsonNull()
+                || !"interactionRequested".equals(event.get("kind").getAsString())) {
+            return false;
+        }
+        if (event.has("resolved") && !event.get("resolved").isJsonNull() && event.get("resolved").getAsBoolean()) {
+            return false;
+        }
+        if (!event.has("payload") || !event.get("payload").isJsonObject()) {
+            return false;
+        }
+        JsonObject payload = event.getAsJsonObject("payload");
+        String method = payload.has("method") && !payload.get("method").isJsonNull()
+                ? payload.get("method").getAsString() : "";
+        return method.contains("requestUserInput") || method.contains("elicitation");
     }
 
     @Override

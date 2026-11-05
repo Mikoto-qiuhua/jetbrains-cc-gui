@@ -829,12 +829,7 @@ public class PermissionHandler extends BaseMessageHandler {
             // Remind the user (via the opt-in system toast and sound) that Claude is waiting for an
             // answer. Triggered here — before the JS dialog render — so the toast fires
             // for every AskUserQuestion regardless of whether the webview is reachable.
-            try {
-                askUserQuestionVisualNotifier.remind();
-                askUserQuestionSoundNotifier.play();
-            } catch (Exception e) {
-                LOG.warn("[ASK_USER_QUESTION][SHOW_DIALOG] Failed to show reminder notification: " + e.getMessage());
-            }
+            remindUserInputRequest();
 
             scheduleSafetyNet(future, () -> {
                 if (future.complete(new JsonObject())) {
@@ -857,6 +852,19 @@ public class PermissionHandler extends BaseMessageHandler {
         }
 
         return future;
+    }
+
+    /**
+     * Remind the user (opt-in toast + sound) that a question interaction awaits an answer.
+     * Shared by Claude's AskUserQuestion and Codex's requestUserInput/elicitation flows.
+     */
+    public void remindUserInputRequest() {
+        try {
+            askUserQuestionVisualNotifier.remind();
+            askUserQuestionSoundNotifier.play();
+        } catch (Exception e) {
+            LOG.warn("[ASK_USER_QUESTION][SHOW_DIALOG] Failed to show reminder notification: " + e.getMessage());
+        }
     }
 
     /**
